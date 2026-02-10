@@ -28,6 +28,7 @@ jobs:
 
       - name: Execute script
         env:
+          ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           USERNAME: ${{ secrets.USERNAME }}
           PASSWORD: ${{ secrets.PASSWORD }}
           LINUXDO_USERNAME: ${{ secrets.LINUXDO_USERNAME }}

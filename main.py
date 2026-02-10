@@ -6,6 +6,7 @@ new Env("Linux.Do 签到")
 import os
 import random
 import time
+import json
 import functools
 from loguru import logger
 from DrissionPage import ChromiumOptions, Chromium
@@ -41,20 +42,15 @@ def retry_decorator(retries=3, min_delay=5, max_delay=10):
     return decorator
 
 
+
 os.environ.pop("DISPLAY", None)
 os.environ.pop("DYLD_LIBRARY_PATH", None)
 
-USERNAME = os.environ.get("LINUXDO_USERNAME")
-PASSWORD = os.environ.get("LINUXDO_PASSWORD")
 BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in [
     "false",
     "0",
     "off",
 ]
-if not USERNAME:
-    USERNAME = os.environ.get("USERNAME")
-if not PASSWORD:
-    PASSWORD = os.environ.get("PASSWORD")
 
 HOME_URL = "https://linux.do/"
 LOGIN_URL = "https://linux.do/login"
@@ -63,7 +59,9 @@ CSRF_URL = "https://linux.do/session/csrf"
 
 
 class LinuxDoBrowser:
-    def __init__(self) -> None:
+    def __init__(self, username: str, password: str) -> None:
+        self.username = username
+        self.password = password
         from sys import platform
 
         if platform == "linux" or platform == "linux2":
@@ -127,8 +125,8 @@ class LinuxDoBrowser:
         )
 
         data = {
-            "login": USERNAME,
-            "password": PASSWORD,
+            "login": self.username,
+            "password": self.password,
             "second_factor_method": "1",
             "timezone": "Asia/Shanghai",
         }
@@ -317,7 +315,7 @@ class LinuxDoBrowser:
 
     def send_notifications(self, browse_enabled):
         """发送签到通知"""
-        status_msg = f"✅每日登录成功: {USERNAME}"
+        status_msg = f"✅每日登录成功: {self.username}"
         if browse_enabled:
             status_msg += " + 浏览任务完成"
         
@@ -325,9 +323,63 @@ class LinuxDoBrowser:
         self.notifier.send_all("LINUX DO", status_msg)
 
 
+def get_accounts():
+    """Get account list from ACCOUNTS_JSON or single LINUXDO_USERNAME/PASSWORD env vars."""
+    accounts_json = os.environ.get("ACCOUNTS_JSON")
+    if accounts_json:
+        try:
+            accounts = json.loads(accounts_json)
+            if isinstance(accounts, list) and len(accounts) > 0:
+                logger.info(f"Loaded {len(accounts)} accounts from ACCOUNTS_JSON")
+                return accounts
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse ACCOUNTS_JSON: {e}")
+            exit(1)
+
+    # Fallback to single account env vars
+    username = os.environ.get("LINUXDO_USERNAME") or os.environ.get("USERNAME")
+    password = os.environ.get("LINUXDO_PASSWORD") or os.environ.get("PASSWORD")
+    if username and password:
+        logger.info("Using single account from LINUXDO_USERNAME/PASSWORD")
+        return [{"username": username, "password": password}]
+
+    return []
+
+
 if __name__ == "__main__":
-    if not USERNAME or not PASSWORD:
-        print("Please set USERNAME and PASSWORD")
+    accounts = get_accounts()
+    if not accounts:
+        print("No accounts configured. Set ACCOUNTS_JSON or LINUXDO_USERNAME/PASSWORD.")
         exit(1)
-    browser = LinuxDoBrowser()
-    browser.run()
+
+    total = len(accounts)
+    success_list = []
+    fail_list = []
+
+    for i, account in enumerate(accounts, 1):
+        username = account.get("username", "")
+        password = account.get("password", "")
+        if not username or not password:
+            logger.warning(f"[{i}/{total}] Skipping account with missing username/password")
+            fail_list.append(username or f"account_{i}")
+            continue
+
+        logger.info(f"========== [{i}/{total}] Processing: {username} ==========")
+        try:
+            browser = LinuxDoBrowser(username, password)
+            browser.run()
+            success_list.append(username)
+        except Exception as e:
+            logger.error(f"[{i}/{total}] Account {username} failed: {e}")
+            fail_list.append(username)
+
+        # Delay between accounts to avoid rate limiting
+        if i < total:
+            delay = random.uniform(10, 30)
+            logger.info(f"Waiting {delay:.1f}s before next account...")
+            time.sleep(delay)
+
+    logger.info("========== Summary ==========")
+    logger.info(f"Total: {total} | Success: {len(success_list)} | Failed: {len(fail_list)}")
+    if fail_list:
+        logger.warning(f"Failed accounts: {', '.join(fail_list)}")
