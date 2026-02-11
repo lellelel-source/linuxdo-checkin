@@ -425,14 +425,20 @@ if __name__ == "__main__":
     JOB_INDEX = int(os.environ.get("JOB_INDEX") or "0")
     JOB_TOTAL = int(os.environ.get("JOB_TOTAL") or "1")
 
-    # Stagger job start times to avoid all jobs hitting the server at once
+    # Stagger job start times with randomness to look more natural
     if JOB_INDEX > 0:
-        startup_delay = JOB_INDEX * 30
+        startup_delay = JOB_INDEX * 30 + random.randint(0, 45)
         logger.info(f"Job {JOB_INDEX + 1}/{JOB_TOTAL} | Waiting {startup_delay}s before starting...")
         time.sleep(startup_delay)
 
-    # Split accounts evenly across jobs
-    accounts = [a for idx, a in enumerate(all_accounts) if idx % JOB_TOTAL == JOB_INDEX]
+    # Shuffle accounts using today's date as seed so all jobs agree on the order
+    from datetime import date
+    daily_seed = int(date.today().strftime("%Y%m%d"))
+    shuffled = list(all_accounts)
+    random.Random(daily_seed).shuffle(shuffled)
+
+    # Split shuffled accounts evenly across jobs
+    accounts = [a for idx, a in enumerate(shuffled) if idx % JOB_TOTAL == JOB_INDEX]
     logger.info(f"Job {JOB_INDEX + 1}/{JOB_TOTAL} | Assigned {len(accounts)}/{len(all_accounts)} accounts")
 
     total = len(accounts)
