@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job_index: [0, 1, 2, 3]
+        job_index: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
       - uses: browser-actions/setup-chrome@v1
@@ -31,7 +31,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Execute script (Job ${{ matrix.job_index }}/4)
+      - name: Execute script (Job ${{ matrix.job_index }}/8)
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
           USERNAME: ${{ secrets.USERNAME }}
@@ -53,7 +53,7 @@ jobs:
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           JOB_INDEX: ${{ matrix.job_index }}
-          JOB_TOTAL: 4
+          JOB_TOTAL: 8
         run: |
           python main.py
 
