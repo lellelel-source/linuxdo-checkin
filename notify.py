@@ -27,8 +27,8 @@ class NotificationManager:
         self.telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         self.email_address = os.environ.get("EMAIL_ADDRESS")
         self.email_password = os.environ.get("EMAIL_PASSWORD")
-        self.smtp_server = os.environ.get("SMTP_SERVER", "smtp.qq.com")
-        self.smtp_port = int(os.environ.get("SMTP_PORT", "465"))
+        self.smtp_server = os.environ.get("SMTP_SERVER") or "smtp.qq.com"
+        self.smtp_port = int(os.environ.get("SMTP_PORT") or "465")
     
     def send_all(self, title: str, message: str):
         """发送所有配置的通知"""

@@ -428,9 +428,8 @@ if __name__ == "__main__":
         f"Total: {total} | Success: {len(success_list)} | Failed: {len(fail_list)}",
         "",
         f"✅ Successful ({len(success_list)}):",
-        *[f"  - {u}" for u in success_list],
-        "",
-        f"❌ Failed ({len(fail_list)}):",
-        *[f"  - {u}" for u in fail_list] if fail_list else ["  (none)"],
     ]
+    summary_lines += [f"  - {u}" for u in success_list] if success_list else ["  (none)"]
+    summary_lines += ["", f"❌ Failed ({len(fail_list)}):"]
+    summary_lines += [f"  - {u}" for u in fail_list] if fail_list else ["  (none)"]
     summary_notifier.send_email("LinuxDo Check-in Summary", "\n".join(summary_lines))
