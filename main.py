@@ -104,16 +104,33 @@ class LinuxDoBrowser:
             "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
         ])
 
+        # User "personality" — consistent browsing speed within a session
+        # speed_factor < 1 = fast reader, > 1 = slow reader
+        self._speed = random.uniform(0.6, 1.6)
+
         co = (
             ChromiumOptions()
             .headless(True)
             .incognito(True)
             .set_argument("--no-sandbox")
             .set_argument(f"--window-size={viewport[0]},{viewport[1]}")
+            .set_argument("--disable-blink-features=AutomationControlled")
+            .set_argument("--disable-features=AutomationControlled")
+            .set_argument("--disable-infobars")
+            .set_argument("--disable-dev-shm-usage")
         )
         co.set_user_agent(ua)
         self.browser = Chromium(co)
         self.page = self.browser.new_tab()
+
+        # Hide webdriver property to avoid bot detection
+        self.page.run_js("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            window.chrome = {runtime: {}};
+        """)
+
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -125,6 +142,12 @@ class LinuxDoBrowser:
         self._accept_lang = accept_lang
         # 初始化通知管理器
         self.notifier = NotificationManager()
+
+    def _wait(self, base_min, base_max):
+        """Sleep for a personality-adjusted random duration."""
+        t = random.uniform(base_min, base_max) * self._speed
+        time.sleep(t)
+        return t
 
     def login(self):
         logger.info("开始登录")
@@ -247,16 +270,13 @@ class LinuxDoBrowser:
     def browse_homepage(self):
         """Scroll the homepage a bit before clicking topics, like a real user."""
         logger.info("浏览首页...")
-        # Pause to "look at" the homepage
-        time.sleep(random.uniform(2, 5))
-        # Scroll down 1-3 times
+        self._wait(2, 5)
         for _ in range(random.randint(1, 3)):
             scroll = random.randint(300, 700)
             self.page.run_js(f"window.scrollBy({{top: {scroll}, behavior: 'smooth'}})")
-            time.sleep(random.uniform(1.5, 4))
-        # Scroll back to top before selecting topics
+            self._wait(1.5, 4)
         self.page.run_js("window.scrollTo({top: 0, behavior: 'smooth'})")
-        time.sleep(random.uniform(1, 2))
+        self._wait(1, 2)
 
     def click_topic(self):
         topic_list = self.page.ele("@id=list-area").eles(".:title")
@@ -268,11 +288,9 @@ class LinuxDoBrowser:
         logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择{browse_count}个")
         for i, topic in enumerate(random.sample(topic_list, browse_count)):
             self.click_one_topic(topic.attr("href"))
-            # Pause between topics like a real user
             if i < browse_count - 1:
-                gap = random.uniform(3, 10)
+                gap = self._wait(3, 10)
                 logger.info(f"浏览下一个帖子前等待 {gap:.1f}s...")
-                time.sleep(gap)
         return True
 
     @retry_decorator()
@@ -280,7 +298,13 @@ class LinuxDoBrowser:
         new_page = self.browser.new_tab()
         try:
             new_page.get(topic_url)
-            # Decide when to like: before reading, during, or after
+
+            # ~10% chance to bail out quickly ("not what I expected")
+            if random.random() < 0.10:
+                logger.info("快速浏览后离开帖子 (不感兴趣)")
+                self._wait(1, 3)
+                return
+
             like_timing = random.choice(["before", "during", "after", "none", "none", "none", "none"])
             if like_timing == "before":
                 self.click_like(new_page)
@@ -298,13 +322,10 @@ class LinuxDoBrowser:
         max_scrolls = random.randint(5, 15)
         like_at_scroll = random.randint(2, max_scrolls - 1) if like_during else -1
 
-        # Initial reading pause at the top of the post
-        initial_pause = random.uniform(2, 6)
+        initial_pause = self._wait(2, 6)
         logger.info(f"阅读帖子顶部，等待 {initial_pause:.1f}s...")
-        time.sleep(initial_pause)
 
         for i in range(max_scrolls):
-            # Varied scroll distance - sometimes skim, sometimes read carefully
             if random.random() < 0.15:
                 scroll_distance = random.randint(100, 300)
             elif random.random() < 0.1:
@@ -314,13 +335,10 @@ class LinuxDoBrowser:
 
             direction = "上" if scroll_distance < 0 else "下"
             logger.info(f"向{direction}滚动 {abs(scroll_distance)} 像素...")
-            # Smooth scroll like a real browser
             page.run_js(f"window.scrollBy({{top: {scroll_distance}, behavior: 'smooth'}})")
-            # Small wait for smooth scroll animation to complete
             time.sleep(random.uniform(0.3, 0.8))
             logger.info(f"已加载页面: {page.url}")
 
-            # Like mid-scroll if scheduled
             if i == like_at_scroll:
                 self.click_like(page)
 
@@ -328,7 +346,6 @@ class LinuxDoBrowser:
                 logger.success("随机退出浏览")
                 break
 
-            # Check if reached the bottom
             at_bottom = page.run_js(
                 "window.scrollY + window.innerHeight >= document.body.scrollHeight"
             )
@@ -339,15 +356,14 @@ class LinuxDoBrowser:
                 logger.success("已到达页面底部，退出浏览")
                 break
 
-            # Varied wait times - sometimes quick skim, sometimes long pause to "read"
+            # Personality-adjusted wait times
             if random.random() < 0.2:
-                wait_time = random.uniform(5, 12)
+                wait_time = self._wait(5, 12)
             elif random.random() < 0.3:
-                wait_time = random.uniform(1, 2)
+                wait_time = self._wait(1, 2)
             else:
-                wait_time = random.uniform(2, 5)
+                wait_time = self._wait(2, 5)
             logger.info(f"等待 {wait_time:.2f} 秒...")
-            time.sleep(wait_time)
 
     def run(self):
         try:
@@ -362,6 +378,10 @@ class LinuxDoBrowser:
                 if random.random() < 0.15:
                     logger.info("模拟快速登录用户，跳过浏览")
                 else:
+                    # Occasionally check notifications or profile first (~20%)
+                    if random.random() < 0.20:
+                        self.visit_side_page()
+
                     # Browse homepage first like a real user
                     self.browse_homepage()
                     click_topic_res = self.click_topic()
@@ -369,6 +389,10 @@ class LinuxDoBrowser:
                         logger.error("点击主题失败，程序终止")
                         return
                     logger.info("完成浏览任务")
+
+                    # Sometimes check notifications after browsing too (~15%)
+                    if random.random() < 0.15:
+                        self.visit_side_page()
 
             self.send_notifications(BROWSE_ENABLED)  # 发送通知
         finally:
@@ -380,6 +404,30 @@ class LinuxDoBrowser:
                 self.browser.quit()
             except Exception:
                 pass
+
+    def visit_side_page(self):
+        """Occasionally visit notifications, profile, or categories like a real user."""
+        side_pages = [
+            ("https://linux.do/notifications", "通知页面"),
+            ("https://linux.do/categories", "分类页面"),
+            ("https://linux.do/latest", "最新帖子"),
+            ("https://linux.do/top", "热门帖子"),
+        ]
+        url, name = random.choice(side_pages)
+        logger.info(f"访问{name}: {url}")
+        try:
+            self.page.get(url)
+            self._wait(3, 8)
+            # Scroll a bit
+            if random.random() < 0.5:
+                scroll = random.randint(200, 500)
+                self.page.run_js(f"window.scrollBy({{top: {scroll}, behavior: 'smooth'}})")
+                self._wait(2, 5)
+            # Go back to homepage
+            self.page.get(HOME_URL)
+            self._wait(2, 4)
+        except Exception as e:
+            logger.warning(f"访问{name}失败: {e}")
 
     def click_like(self, page):
         try:
