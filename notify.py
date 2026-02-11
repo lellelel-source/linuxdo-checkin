@@ -6,6 +6,9 @@ import os
 import re
 import random
 import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from loguru import logger
 from curl_cffi import requests
 
@@ -22,6 +25,10 @@ class NotificationManager:
         self.wxpush_token = os.environ.get("WXPUSH_TOKEN")
         self.telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
         self.telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        self.email_address = os.environ.get("EMAIL_ADDRESS")
+        self.email_password = os.environ.get("EMAIL_PASSWORD")
+        self.smtp_server = os.environ.get("SMTP_SERVER", "smtp.qq.com")
+        self.smtp_port = int(os.environ.get("SMTP_PORT", "465"))
     
     def send_all(self, title: str, message: str):
         """发送所有配置的通知"""
@@ -29,6 +36,7 @@ class NotificationManager:
         self.send_server_chan(title, message)
         self.send_wxpush(title, message)
         self.send_telegram(title, message)
+        self.send_email(title, message)
     
     def send_gotify(self, title: str, message: str):
         """发送 Gotify 通知"""
@@ -126,4 +134,28 @@ class NotificationManager:
             return True
         except Exception as e:
             logger.error(f"Telegram 推送失败: {str(e)}")
+            return False
+
+    def send_email(self, title: str, message: str):
+        """发送邮件通知"""
+        if not self.email_address or not self.email_password:
+            logger.info("未配置 EMAIL_ADDRESS 或 EMAIL_PASSWORD，跳过邮件通知")
+            return False
+
+        try:
+            msg = MIMEMultipart()
+            msg["From"] = self.email_address
+            msg["To"] = self.email_address
+            msg["Subject"] = title
+
+            msg.attach(MIMEText(message, "plain", "utf-8"))
+
+            with smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, timeout=10) as server:
+                server.login(self.email_address, self.email_password)
+                server.sendmail(self.email_address, self.email_address, msg.as_string())
+
+            logger.success(f"邮件通知发送成功: {self.email_address}")
+            return True
+        except Exception as e:
+            logger.error(f"邮件通知发送失败: {str(e)}")
             return False

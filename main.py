@@ -421,3 +421,16 @@ if __name__ == "__main__":
         logger.success(f"Successful accounts: {', '.join(success_list)}")
     if fail_list:
         logger.warning(f"Failed accounts: {', '.join(fail_list)}")
+
+    # Send a single summary email with all results
+    summary_notifier = NotificationManager()
+    summary_lines = [
+        f"Total: {total} | Success: {len(success_list)} | Failed: {len(fail_list)}",
+        "",
+        f"✅ Successful ({len(success_list)}):",
+        *[f"  - {u}" for u in success_list],
+        "",
+        f"❌ Failed ({len(fail_list)}):",
+        *[f"  - {u}" for u in fail_list] if fail_list else ["  (none)"],
+    ]
+    summary_notifier.send_email("LinuxDo Check-in Summary", "\n".join(summary_lines))
