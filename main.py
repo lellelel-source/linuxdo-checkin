@@ -394,6 +394,12 @@ if __name__ == "__main__":
     JOB_INDEX = int(os.environ.get("JOB_INDEX") or "0")
     JOB_TOTAL = int(os.environ.get("JOB_TOTAL") or "1")
 
+    # Stagger job start times to avoid all jobs hitting the server at once
+    if JOB_INDEX > 0:
+        startup_delay = JOB_INDEX * 30
+        logger.info(f"Job {JOB_INDEX + 1}/{JOB_TOTAL} | Waiting {startup_delay}s before starting...")
+        time.sleep(startup_delay)
+
     # Split accounts evenly across jobs
     accounts = [a for idx, a in enumerate(all_accounts) if idx % JOB_TOTAL == JOB_INDEX]
     logger.info(f"Job {JOB_INDEX + 1}/{JOB_TOTAL} | Assigned {len(accounts)}/{len(all_accounts)} accounts")
