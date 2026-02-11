@@ -54,6 +54,18 @@ BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in
     "off",
 ]
 
+# Randomized Chrome versions for varied fingerprints
+CHROME_VERSIONS = [
+    "120.0.0.0", "121.0.0.0", "122.0.0.0", "123.0.0.0", "124.0.0.0",
+    "125.0.0.0", "126.0.0.0", "127.0.0.0", "128.0.0.0", "129.0.0.0",
+    "130.0.0.0", "131.0.0.0", "132.0.0.0", "133.0.0.0", "134.0.0.0",
+]
+
+VIEWPORTS = [
+    (1366, 768), (1440, 900), (1536, 864), (1600, 900),
+    (1920, 1080), (1280, 720), (1280, 800), (1680, 1050),
+]
+
 HOME_URL = "https://linux.do/"
 LOGIN_URL = "https://linux.do/login"
 SESSION_URL = "https://linux.do/session"
@@ -75,21 +87,25 @@ class LinuxDoBrowser:
         else:
             platformIdentifier = "X11; Linux x86_64"
 
+        # Randomize Chrome version and viewport per account
+        chrome_ver = random.choice(CHROME_VERSIONS)
+        viewport = random.choice(VIEWPORTS)
+        ua = f"Mozilla/5.0 ({platformIdentifier}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36"
+
         co = (
             ChromiumOptions()
             .headless(True)
             .incognito(True)
             .set_argument("--no-sandbox")
+            .set_argument(f"--window-size={viewport[0]},{viewport[1]}")
         )
-        co.set_user_agent(
-            f"Mozilla/5.0 ({platformIdentifier}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-        )
+        co.set_user_agent(ua)
         self.browser = Chromium(co)
         self.page = self.browser.new_tab()
         self.session = requests.Session()
         self.session.headers.update(
             {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
+                "User-Agent": ua,
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Accept-Language": "zh-CN,zh;q=0.9",
             }
@@ -102,7 +118,7 @@ class LinuxDoBrowser:
         # Step 1: Get CSRF Token
         logger.info("获取 CSRF token...")
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
+            "User-Agent": self.session.headers["User-Agent"],
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "zh-CN,zh;q=0.9",
             "X-Requested-With": "XMLHttpRequest",
@@ -233,18 +249,23 @@ class LinuxDoBrowser:
         new_page = self.browser.new_tab()
         try:
             new_page.get(topic_url)
-            if random.random() < 0.3:  # 0.3 * 30 = 9
+            # Decide when to like: before reading, during, or after
+            like_timing = random.choice(["before", "during", "after", "none", "none", "none", "none"])
+            if like_timing == "before":
                 self.click_like(new_page)
-            self.browse_post(new_page)
+            self.browse_post(new_page, like_during=(like_timing == "during"))
+            if like_timing == "after":
+                self.click_like(new_page)
         finally:
             try:
                 new_page.close()
             except Exception:
                 pass
 
-    def browse_post(self, page):
+    def browse_post(self, page, like_during=False):
         prev_url = None
         max_scrolls = random.randint(5, 15)
+        like_at_scroll = random.randint(2, max_scrolls - 1) if like_during else -1
 
         # Initial reading pause at the top of the post
         initial_pause = random.uniform(2, 6)
@@ -254,19 +275,23 @@ class LinuxDoBrowser:
         for i in range(max_scrolls):
             # Varied scroll distance - sometimes skim, sometimes read carefully
             if random.random() < 0.15:
-                # Occasional small scroll (reading carefully)
                 scroll_distance = random.randint(100, 300)
             elif random.random() < 0.1:
-                # Occasional scroll back up
                 scroll_distance = -random.randint(100, 250)
             else:
-                # Normal scroll with wider range
                 scroll_distance = random.randint(300, 800)
 
             direction = "上" if scroll_distance < 0 else "下"
             logger.info(f"向{direction}滚动 {abs(scroll_distance)} 像素...")
-            page.run_js(f"window.scrollBy(0, {scroll_distance})")
+            # Smooth scroll like a real browser
+            page.run_js(f"window.scrollBy({{top: {scroll_distance}, behavior: 'smooth'}})")
+            # Small wait for smooth scroll animation to complete
+            time.sleep(random.uniform(0.3, 0.8))
             logger.info(f"已加载页面: {page.url}")
+
+            # Like mid-scroll if scheduled
+            if i == like_at_scroll:
+                self.click_like(page)
 
             if random.random() < 0.05:
                 logger.success("随机退出浏览")
@@ -285,13 +310,10 @@ class LinuxDoBrowser:
 
             # Varied wait times - sometimes quick skim, sometimes long pause to "read"
             if random.random() < 0.2:
-                # Longer pause - reading something interesting
                 wait_time = random.uniform(5, 12)
             elif random.random() < 0.3:
-                # Quick skim
                 wait_time = random.uniform(1, 2)
             else:
-                # Normal reading speed
                 wait_time = random.uniform(2, 5)
             logger.info(f"等待 {wait_time:.2f} 秒...")
             time.sleep(wait_time)
