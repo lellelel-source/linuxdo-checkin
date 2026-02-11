@@ -95,6 +95,15 @@ class LinuxDoBrowser:
         # Pick a consistent impersonation for this session
         self._impersonate = random.choice(["chrome133", "chrome134", "chrome136"])
 
+        # Randomize Accept-Language per account
+        accept_lang = random.choice([
+            "zh-CN,zh;q=0.9",
+            "zh-CN,zh;q=0.9,en;q=0.8",
+            "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "zh-TW,zh;q=0.9,en-US;q=0.8",
+            "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+        ])
+
         co = (
             ChromiumOptions()
             .headless(True)
@@ -110,9 +119,10 @@ class LinuxDoBrowser:
             {
                 "User-Agent": ua,
                 "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Accept-Language": "zh-CN,zh;q=0.9",
+                "Accept-Language": accept_lang,
             }
         )
+        self._accept_lang = accept_lang
         # 初始化通知管理器
         self.notifier = NotificationManager()
 
@@ -123,7 +133,7 @@ class LinuxDoBrowser:
         headers = {
             "User-Agent": self.session.headers["User-Agent"],
             "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Accept-Language": self._accept_lang,
             "X-Requested-With": "XMLHttpRequest",
             "Referer": LOGIN_URL,
         }
@@ -217,7 +227,7 @@ class LinuxDoBrowser:
         logger.info("Cookie 设置完成，导航至 linux.do...")
         self.page.get(HOME_URL)
 
-        time.sleep(5)
+        time.sleep(random.uniform(3, 7))
         try:
             user_ele = self.page.ele("@id=current-user")
         except Exception as e:
@@ -391,7 +401,7 @@ class LinuxDoBrowser:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         }
         resp = self.session.get(
-            "https://connect.linux.do/", headers=headers, impersonate="chrome136"
+            "https://connect.linux.do/", headers=headers, impersonate=self._impersonate
         )
         soup = BeautifulSoup(resp.text, "html.parser")
         rows = soup.select("table tr")
