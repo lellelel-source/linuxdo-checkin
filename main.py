@@ -216,8 +216,10 @@ class LinuxDoBrowser:
         if not topic_list:
             logger.error("未找到主题帖")
             return False
-        logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择10个")
-        for topic in random.sample(topic_list, 10):
+        browse_count = random.randint(3, 8)
+        browse_count = min(browse_count, len(topic_list))
+        logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择{browse_count}个")
+        for topic in random.sample(topic_list, browse_count):
             self.click_one_topic(topic.attr("href"))
         return True
 
