@@ -385,7 +385,7 @@ if __name__ == "__main__":
 
     # BATCH_SIZE controls how many accounts run in parallel per batch
     # Default: 5 concurrent accounts per batch (safe for most environments)
-    BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "5"))
+    BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or "5")
     logger.info(f"Total accounts: {total} | Batch size: {BATCH_SIZE} | Batches: {(total + BATCH_SIZE - 1) // BATCH_SIZE}")
 
     # Split accounts into batches
