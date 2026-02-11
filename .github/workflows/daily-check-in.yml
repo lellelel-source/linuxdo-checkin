@@ -10,6 +10,7 @@ on:
 jobs:
   run_script:
     runs-on: ubuntu-22.04
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: browser-actions/setup-chrome@v1
@@ -42,6 +43,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           BROWSE_ENABLED: ${{ secrets.BROWSE_ENABLED }}
           BATCH_SIZE: ${{ secrets.BATCH_SIZE }}
+          ACCOUNT_DELAY: ${{ secrets.ACCOUNT_DELAY }}
           EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}

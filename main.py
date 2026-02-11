@@ -144,9 +144,20 @@ class LinuxDoBrowser:
                     logger.error(f"登录失败: {response_json.get('error')}")
                     return False
                 logger.info("登录成功!")
+            elif resp_login.status_code == 429:
+                # Rate limited - extract wait time and signal caller to retry
+                try:
+                    err_json = resp_login.json()
+                    wait_seconds = err_json.get("extras", {}).get("wait_seconds", 60)
+                    time_left = err_json.get("extras", {}).get("time_left", "unknown")
+                    logger.warning(f"触发速率限制，需要等待 {time_left} ({wait_seconds}s)")
+                    self._rate_limit_wait = wait_seconds
+                except Exception:
+                    self._rate_limit_wait = 60
+                return "rate_limited"
             else:
                 logger.error(f"登录失败，状态码: {resp_login.status_code}")
-                logger.error(resp_login.text)
+                logger.error(resp_login.text[:200])
                 return False
         except Exception as e:
             logger.error(f"登录请求异常: {e}")
@@ -257,6 +268,8 @@ class LinuxDoBrowser:
     def run(self):
         try:
             login_res = self.login()
+            if login_res == "rate_limited":
+                raise Exception(f"RATE_LIMITED:{getattr(self, '_rate_limit_wait', 60)}")
             if not login_res:  # 登录
                 logger.warning("登录验证失败")
 
@@ -362,8 +375,6 @@ def process_account(account, index, total):
 
     logger.info(f"========== [{index}/{total}] Processing: {username} ==========")
     try:
-        # Add a small random stagger so threads don't all hit the server at once
-        time.sleep(random.uniform(0, 5))
         browser = LinuxDoBrowser(username, password)
         browser.run()
         logger.success(f"[{index}/{total}] Account {username} completed successfully")
@@ -382,38 +393,71 @@ if __name__ == "__main__":
     total = len(accounts)
     success_list = []
     fail_list = []
+    rate_limited_queue = []  # accounts to retry after rate limit
 
-    # BATCH_SIZE controls how many accounts run in parallel per batch
-    # Default: 5 concurrent accounts per batch (safe for most environments)
-    BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or "5")
-    logger.info(f"Total accounts: {total} | Batch size: {BATCH_SIZE} | Batches: {(total + BATCH_SIZE - 1) // BATCH_SIZE}")
+    # Process accounts one by one with delay to avoid rate limiting
+    ACCOUNT_DELAY = int(os.environ.get("ACCOUNT_DELAY") or "60")  # seconds between accounts
+    logger.info(f"Total accounts: {total} | Delay between accounts: {ACCOUNT_DELAY}s")
 
-    # Split accounts into batches
-    batches = [accounts[i:i + BATCH_SIZE] for i in range(0, total, BATCH_SIZE)]
+    for i, account in enumerate(accounts, 1):
+        username = account.get("username", "")
+        password = account.get("password", "")
+        if not username or not password:
+            logger.warning(f"[{i}/{total}] Skipping account with missing username/password")
+            fail_list.append(username or f"account_{i}")
+            continue
 
-    for batch_num, batch in enumerate(batches, 1):
-        logger.info(f"========== Batch {batch_num}/{len(batches)} ({len(batch)} accounts) ==========")
+        logger.info(f"========== [{i}/{total}] Processing: {username} ==========")
+        try:
+            browser = LinuxDoBrowser(username, password)
+            browser.run()
+            success_list.append(username)
+            logger.success(f"[{i}/{total}] Account {username} completed successfully")
+        except Exception as e:
+            error_msg = str(e)
+            if "RATE_LIMITED" in error_msg:
+                # Extract wait time from error message
+                try:
+                    wait_secs = int(error_msg.split(":")[1])
+                except (IndexError, ValueError):
+                    wait_secs = 120
+                logger.warning(f"[{i}/{total}] Account {username} hit rate limit, queued for retry")
+                rate_limited_queue.append(account)
+                # Wait for the rate limit to expire, then continue
+                wait_secs = min(wait_secs + 30, 2100)  # add 30s buffer, cap at 35min
+                logger.info(f"Rate limit detected. Waiting {wait_secs}s before continuing...")
+                time.sleep(wait_secs)
+                continue  # skip the normal delay since we already waited
+            else:
+                logger.error(f"[{i}/{total}] Account {username} failed: {e}")
+                fail_list.append(username)
 
-        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-            # Calculate global index for each account in this batch
-            start_index = (batch_num - 1) * BATCH_SIZE + 1
-            futures = {
-                executor.submit(process_account, account, start_index + j, total): account
-                for j, account in enumerate(batch)
-            }
-
-            for future in as_completed(futures):
-                username, success = future.result()
-                if success:
-                    success_list.append(username)
-                else:
-                    fail_list.append(username)
-
-        # Delay between batches to avoid rate limiting
-        if batch_num < len(batches):
-            delay = random.uniform(10, 20)
-            logger.info(f"Batch {batch_num} done. Waiting {delay:.1f}s before next batch...")
+        # Delay between accounts to avoid rate limiting
+        if i < total:
+            delay = random.uniform(ACCOUNT_DELAY, ACCOUNT_DELAY + 15)
+            logger.info(f"Waiting {delay:.1f}s before next account...")
             time.sleep(delay)
+
+    # Retry rate-limited accounts
+    if rate_limited_queue:
+        logger.info(f"========== Retrying {len(rate_limited_queue)} rate-limited accounts ==========")
+        for i, account in enumerate(rate_limited_queue, 1):
+            username = account.get("username", "")
+            password = account.get("password", "")
+            logger.info(f"========== [Retry {i}/{len(rate_limited_queue)}] Processing: {username} ==========")
+            try:
+                browser = LinuxDoBrowser(username, password)
+                browser.run()
+                success_list.append(username)
+                logger.success(f"[Retry {i}] Account {username} completed successfully")
+            except Exception as e:
+                logger.error(f"[Retry {i}] Account {username} failed: {e}")
+                fail_list.append(username)
+
+            if i < len(rate_limited_queue):
+                delay = random.uniform(ACCOUNT_DELAY, ACCOUNT_DELAY + 15)
+                logger.info(f"Waiting {delay:.1f}s before next retry...")
+                time.sleep(delay)
 
     logger.info("========== Summary ==========")
     logger.info(f"Total: {total} | Success: {len(success_list)} | Failed: {len(fail_list)}")
