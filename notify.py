@@ -31,12 +31,11 @@ class NotificationManager:
         self.smtp_port = int(os.environ.get("SMTP_PORT") or "465")
     
     def send_all(self, title: str, message: str):
-        """发送所有配置的通知"""
+        """发送所有配置的通知（不含邮件，邮件仅用于最终汇总）"""
         self.send_gotify(title, message)
         self.send_server_chan(title, message)
         self.send_wxpush(title, message)
         self.send_telegram(title, message)
-        self.send_email(title, message)
     
     def send_gotify(self, title: str, message: str):
         """发送 Gotify 通知"""
