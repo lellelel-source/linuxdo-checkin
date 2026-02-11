@@ -219,8 +219,13 @@ class LinuxDoBrowser:
         browse_count = random.randint(3, 8)
         browse_count = min(browse_count, len(topic_list))
         logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择{browse_count}个")
-        for topic in random.sample(topic_list, browse_count):
+        for i, topic in enumerate(random.sample(topic_list, browse_count)):
             self.click_one_topic(topic.attr("href"))
+            # Pause between topics like a real user
+            if i < browse_count - 1:
+                gap = random.uniform(3, 10)
+                logger.info(f"浏览下一个帖子前等待 {gap:.1f}s...")
+                time.sleep(gap)
         return True
 
     @retry_decorator()
@@ -239,19 +244,35 @@ class LinuxDoBrowser:
 
     def browse_post(self, page):
         prev_url = None
-        # 开始自动滚动，最多滚动10次
-        for _ in range(10):
-            # 随机滚动一段距离
-            scroll_distance = random.randint(550, 650)  # 随机滚动 550-650 像素
-            logger.info(f"向下滚动 {scroll_distance} 像素...")
+        max_scrolls = random.randint(5, 15)
+
+        # Initial reading pause at the top of the post
+        initial_pause = random.uniform(2, 6)
+        logger.info(f"阅读帖子顶部，等待 {initial_pause:.1f}s...")
+        time.sleep(initial_pause)
+
+        for i in range(max_scrolls):
+            # Varied scroll distance - sometimes skim, sometimes read carefully
+            if random.random() < 0.15:
+                # Occasional small scroll (reading carefully)
+                scroll_distance = random.randint(100, 300)
+            elif random.random() < 0.1:
+                # Occasional scroll back up
+                scroll_distance = -random.randint(100, 250)
+            else:
+                # Normal scroll with wider range
+                scroll_distance = random.randint(300, 800)
+
+            direction = "上" if scroll_distance < 0 else "下"
+            logger.info(f"向{direction}滚动 {abs(scroll_distance)} 像素...")
             page.run_js(f"window.scrollBy(0, {scroll_distance})")
             logger.info(f"已加载页面: {page.url}")
 
-            if random.random() < 0.03:  # 33 * 4 = 132
+            if random.random() < 0.05:
                 logger.success("随机退出浏览")
                 break
 
-            # 检查是否到达页面底部
+            # Check if reached the bottom
             at_bottom = page.run_js(
                 "window.scrollY + window.innerHeight >= document.body.scrollHeight"
             )
@@ -262,8 +283,16 @@ class LinuxDoBrowser:
                 logger.success("已到达页面底部，退出浏览")
                 break
 
-            # 动态随机等待
-            wait_time = random.uniform(2, 4)  # 随机等待 2-4 秒
+            # Varied wait times - sometimes quick skim, sometimes long pause to "read"
+            if random.random() < 0.2:
+                # Longer pause - reading something interesting
+                wait_time = random.uniform(5, 12)
+            elif random.random() < 0.3:
+                # Quick skim
+                wait_time = random.uniform(1, 2)
+            else:
+                # Normal reading speed
+                wait_time = random.uniform(2, 5)
             logger.info(f"等待 {wait_time:.2f} 秒...")
             time.sleep(wait_time)
 
