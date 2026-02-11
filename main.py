@@ -92,6 +92,9 @@ class LinuxDoBrowser:
         viewport = random.choice(VIEWPORTS)
         ua = f"Mozilla/5.0 ({platformIdentifier}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36"
 
+        # Pick a consistent impersonation for this session
+        self._impersonate = random.choice(["chrome133", "chrome134", "chrome136"])
+
         co = (
             ChromiumOptions()
             .headless(True)
@@ -124,7 +127,7 @@ class LinuxDoBrowser:
             "X-Requested-With": "XMLHttpRequest",
             "Referer": LOGIN_URL,
         }
-        resp_csrf = self.session.get(CSRF_URL, headers=headers, impersonate="firefox135")
+        resp_csrf = self.session.get(CSRF_URL, headers=headers, impersonate=self._impersonate)
         if resp_csrf.status_code != 200:
             logger.error(f"获取 CSRF token 失败: {resp_csrf.status_code}")
             return False        
@@ -146,12 +149,16 @@ class LinuxDoBrowser:
             "login": self.username,
             "password": self.password,
             "second_factor_method": "1",
-            "timezone": "Asia/Shanghai",
+            "timezone": random.choice([
+                "Asia/Shanghai", "Asia/Shanghai", "Asia/Shanghai",
+                "Asia/Chongqing", "Asia/Hong_Kong", "Asia/Taipei",
+                "Asia/Singapore", "Asia/Tokyo",
+            ]),
         }
 
         try:
             resp_login = self.session.post(
-                SESSION_URL, data=data, impersonate="chrome136", headers=headers
+                SESSION_URL, data=data, impersonate=self._impersonate, headers=headers
             )
 
             if resp_login.status_code == 200:
@@ -226,6 +233,20 @@ class LinuxDoBrowser:
         else:
             logger.info("登录验证成功")
             return True
+
+    def browse_homepage(self):
+        """Scroll the homepage a bit before clicking topics, like a real user."""
+        logger.info("浏览首页...")
+        # Pause to "look at" the homepage
+        time.sleep(random.uniform(2, 5))
+        # Scroll down 1-3 times
+        for _ in range(random.randint(1, 3)):
+            scroll = random.randint(300, 700)
+            self.page.run_js(f"window.scrollBy({{top: {scroll}, behavior: 'smooth'}})")
+            time.sleep(random.uniform(1.5, 4))
+        # Scroll back to top before selecting topics
+        self.page.run_js("window.scrollTo({top: 0, behavior: 'smooth'})")
+        time.sleep(random.uniform(1, 2))
 
     def click_topic(self):
         topic_list = self.page.ele("@id=list-area").eles(".:title")
@@ -327,11 +348,17 @@ class LinuxDoBrowser:
                 logger.warning("登录验证失败")
 
             if BROWSE_ENABLED:
-                click_topic_res = self.click_topic()  # 点击主题
-                if not click_topic_res:
-                    logger.error("点击主题失败，程序终止")
-                    return
-                logger.info("完成浏览任务")
+                # Some users just login and leave (~15% chance)
+                if random.random() < 0.15:
+                    logger.info("模拟快速登录用户，跳过浏览")
+                else:
+                    # Browse homepage first like a real user
+                    self.browse_homepage()
+                    click_topic_res = self.click_topic()
+                    if not click_topic_res:
+                        logger.error("点击主题失败，程序终止")
+                        return
+                    logger.info("完成浏览任务")
 
             self.send_notifications(BROWSE_ENABLED)  # 发送通知
         finally:

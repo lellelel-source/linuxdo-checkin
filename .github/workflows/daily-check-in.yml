@@ -31,6 +31,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Random startup delay
+        run: |
+          DELAY=$((RANDOM % 1800))
+          echo "Waiting ${DELAY}s before starting (random 0-30min)..."
+          sleep $DELAY
+
       - name: Execute script (Job ${{ matrix.job_index }}/8)
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
