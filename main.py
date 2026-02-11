@@ -385,10 +385,18 @@ def process_account(account, index, total):
 
 
 if __name__ == "__main__":
-    accounts = get_accounts()
-    if not accounts:
+    all_accounts = get_accounts()
+    if not all_accounts:
         print("No accounts configured. Set ACCOUNTS_JSON or LINUXDO_USERNAME/PASSWORD.")
         exit(1)
+
+    # Job splitting: JOB_INDEX (0-based) and JOB_TOTAL split accounts across parallel jobs
+    JOB_INDEX = int(os.environ.get("JOB_INDEX") or "0")
+    JOB_TOTAL = int(os.environ.get("JOB_TOTAL") or "1")
+
+    # Split accounts evenly across jobs
+    accounts = [a for idx, a in enumerate(all_accounts) if idx % JOB_TOTAL == JOB_INDEX]
+    logger.info(f"Job {JOB_INDEX + 1}/{JOB_TOTAL} | Assigned {len(accounts)}/{len(all_accounts)} accounts")
 
     total = len(accounts)
     success_list = []
