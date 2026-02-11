@@ -624,14 +624,14 @@ if __name__ == "__main__":
     if fail_list:
         logger.warning(f"Failed accounts: {', '.join(fail_list)}")
 
-    # Send a single summary email with all results
-    summary_notifier = NotificationManager()
-    summary_lines = [
-        f"Total: {total} | Success: {len(success_list)} | Failed: {len(fail_list)}",
-        "",
-        f"✅ Successful ({len(success_list)}):",
-    ]
-    summary_lines += [f"  - {u}" for u in success_list] if success_list else ["  (none)"]
-    summary_lines += ["", f"❌ Failed ({len(fail_list)}):"]
-    summary_lines += [f"  - {u}" for u in fail_list] if fail_list else ["  (none)"]
-    summary_notifier.send_email("LinuxDo Check-in Summary", "\n".join(summary_lines))
+    # Save results to JSON file for the summary job to collect
+    results = {
+        "job_index": JOB_INDEX,
+        "total": total,
+        "success": success_list,
+        "fail": fail_list,
+    }
+    results_file = f"results_job_{JOB_INDEX}.json"
+    with open(results_file, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False)
+    logger.info(f"Results saved to {results_file}")

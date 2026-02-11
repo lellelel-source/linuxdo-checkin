@@ -64,8 +64,48 @@ jobs:
         run: |
           python main.py
 
-  cleanup:
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-job-${{ matrix.job_index }}
+          path: results_job_*.json
+          retention-days: 1
+
+  summary:
     needs: checkin
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9.19'
+
+      - name: Install python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: results-job-*
+
+      - name: Send summary email
+        env:
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        run: |
+          python send_summary.py
+
+  cleanup:
+    needs: [checkin, summary]
     if: always()
     runs-on: ubuntu-22.04
     steps:
