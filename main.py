@@ -250,22 +250,28 @@ class LinuxDoBrowser:
         logger.info("Cookie 设置完成，导航至 linux.do...")
         self.page.get(HOME_URL)
 
-        time.sleep(random.uniform(3, 7))
-        try:
-            user_ele = self.page.ele("@id=current-user")
-        except Exception as e:
-            logger.warning(f"登录验证失败: {str(e)}")
-            return True
-        if not user_ele:
+        # Verify login with retry — cookie sync sometimes needs a page reload
+        for attempt in range(3):
+            time.sleep(random.uniform(3, 7))
+            try:
+                user_ele = self.page.ele("@id=current-user")
+                if user_ele:
+                    logger.info("登录验证成功")
+                    return True
+            except Exception:
+                pass
+
             # Fallback check for avatar
             if "avatar" in self.page.html:
                 logger.info("登录验证成功 (通过 avatar)")
                 return True
-            logger.error("登录验证失败 (未找到 current-user)")
-            return False
-        else:
-            logger.info("登录验证成功")
-            return True
+
+            if attempt < 2:
+                logger.warning(f"登录验证失败，第 {attempt + 1}/3 次尝试，刷新页面重试...")
+                self.page.get(HOME_URL)
+            else:
+                logger.error("登录验证失败 (3次尝试后仍未找到 current-user)")
+                return False
 
     def browse_homepage(self):
         """Scroll the homepage a bit before clicking topics, like a real user."""
@@ -370,8 +376,9 @@ class LinuxDoBrowser:
             login_res = self.login()
             if login_res == "rate_limited":
                 raise Exception(f"RATE_LIMITED:{getattr(self, '_rate_limit_wait', 60)}")
-            if not login_res:  # 登录
-                logger.warning("登录验证失败")
+            if not login_res:
+                logger.warning("登录验证失败，跳过浏览")
+                return
 
             if BROWSE_ENABLED:
                 # Some users just login and leave (~15% chance)
