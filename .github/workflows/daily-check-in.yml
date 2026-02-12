@@ -7,6 +7,15 @@ on:
     - cron: '47 14 * * *'  # ~10:47 PM Beijing time
 
   workflow_dispatch:
+    inputs:
+      force_reply_all:
+        description: 'Force ALL accounts to reply (one-time)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 jobs:
   checkin:
@@ -78,6 +87,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           JOB_INDEX: ${{ matrix.job_index }}
           JOB_TOTAL: 8
+          FORCE_REPLY_ALL: ${{ github.event.inputs.force_reply_all || 'false' }}
         run: |
           python main.py
 

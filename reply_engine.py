@@ -407,7 +407,7 @@ def post_reply(page, topic_id: int, text: str, csrf_token: str) -> bool:
 
 
 def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
-                  used_phrases: set = None) -> Optional[Dict]:
+                  used_phrases: set = None, force: bool = False) -> Optional[Dict]:
     """Main entry point: decide whether to reply and do it.
 
     Args:
@@ -415,6 +415,7 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
         bot_usernames: set of usernames belonging to bot accounts (for filtering)
         used_topics: set of topic IDs already replied to in this job (anti-same-IP detection)
         used_phrases: set of phrases already used in this job (anti-duplicate detection)
+        force: if True, skip day/slot scheduling check (one-time force-reply mode)
 
     Returns:
         Dict with reply details on success, None otherwise.
@@ -427,7 +428,9 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
         used_phrases = set()
 
     username = browser.username
-    if not should_reply_today(username):
+    if force:
+        logger.info(f"[Reply] {username}: FORCE_REPLY_ALL mode — skipping schedule check")
+    elif not should_reply_today(username):
         return None
 
     page = browser.page

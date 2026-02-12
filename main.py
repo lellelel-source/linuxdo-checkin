@@ -68,6 +68,13 @@ REPLY_ENABLED = os.environ.get("REPLY_ENABLED", "false").strip().lower() in [
     "on",
 ]
 
+# One-time flag: force ALL accounts to reply (bypasses day/slot scheduling)
+FORCE_REPLY_ALL = os.environ.get("FORCE_REPLY_ALL", "false").strip().lower() in [
+    "true",
+    "1",
+    "on",
+]
+
 # Beijing timezone (UTC+8)
 _BJT = timezone(timedelta(hours=8))
 
@@ -687,8 +694,8 @@ class LinuxDoBrowser:
 
             self.send_notifications(BROWSE_ENABLED)  # 发送通知
 
-            # Auto-reply phase (after browse, gated by REPLY_ENABLED)
-            if REPLY_ENABLED:
+            # Auto-reply phase (after browse, gated by REPLY_ENABLED or FORCE_REPLY_ALL)
+            if REPLY_ENABLED or FORCE_REPLY_ALL:
                 try:
                     from reply_engine import execute_reply
                     self.reply_result = execute_reply(
@@ -696,6 +703,7 @@ class LinuxDoBrowser:
                         bot_usernames=getattr(self, "_bot_usernames", set()),
                         used_topics=getattr(self, "_used_topics", set()),
                         used_phrases=getattr(self, "_used_phrases", set()),
+                        force=FORCE_REPLY_ALL,
                     )
                 except Exception as e:
                     self.log.error(f"[Reply] Reply phase failed: {e}")
