@@ -196,140 +196,90 @@ class LinuxDoBrowser:
     def login(self):
         logger.info("开始登录")
 
-        # Step 0: Visit homepage in browser first to pass Cloudflare challenge
-        # This gets cf_clearance and other protection cookies that the API session needs
-        logger.info("通过浏览器访问首页获取 Cloudflare Cookie...")
+        # Step 1: Navigate to login page in browser (passes Cloudflare automatically)
+        logger.info("通过浏览器访问登录页面...")
         try:
-            self.page.get(HOME_URL)
-            time.sleep(random.uniform(3, 6))
-
-            # Transfer browser cookies to the API session
-            browser_cookies = self.page.cookies()
-            for cookie in browser_cookies:
-                self.session.cookies.set(
-                    cookie.get("name", ""),
-                    cookie.get("value", ""),
-                    domain=cookie.get("domain", ".linux.do"),
-                )
-            logger.info(f"已从浏览器获取 {len(browser_cookies)} 个 Cookie")
+            self.page.get(LOGIN_URL)
+            time.sleep(random.uniform(2, 4))
         except Exception as e:
-            logger.warning(f"浏览器预访问失败: {e}")
-
-        # Step 1: Get CSRF Token
-        logger.info("获取 CSRF token...")
-        headers = {
-            "User-Agent": self.session.headers["User-Agent"],
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": self._accept_lang,
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": LOGIN_URL,
-        }
-        resp_csrf = self.session.get(CSRF_URL, headers=headers, impersonate=self._impersonate)
-        if resp_csrf.status_code != 200:
-            logger.error(f"获取 CSRF token 失败: {resp_csrf.status_code}")
-            return False        
-        csrf_data = resp_csrf.json()
-        csrf_token = csrf_data.get("csrf")
-        self._csrf_token = csrf_token  # Store for reply_engine reuse
-        logger.info(f"CSRF Token obtained: {csrf_token[:10]}...")
-
-        # Step 2: Login
-        logger.info("正在登录...")
-        headers.update(
-            {
-                "X-CSRF-Token": csrf_token,
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Origin": "https://linux.do",
-            }
-        )
-
-        data = {
-            "login": self.username,
-            "password": self.password,
-            "second_factor_method": "1",
-            "timezone": random.choice([
-                "Asia/Shanghai", "Asia/Shanghai", "Asia/Shanghai",
-                "Asia/Chongqing", "Asia/Hong_Kong", "Asia/Taipei",
-                "Asia/Singapore", "Asia/Tokyo",
-            ]),
-        }
-
-        try:
-            resp_login = self.session.post(
-                SESSION_URL, data=data, impersonate=self._impersonate, headers=headers
-            )
-
-            if resp_login.status_code == 200:
-                response_json = resp_login.json()
-                if response_json.get("error"):
-                    logger.error(f"登录失败: {response_json.get('error')}")
-                    return False
-                logger.info("登录成功!")
-            elif resp_login.status_code == 429:
-                # Rate limited - extract wait time and signal caller to retry
-                try:
-                    err_json = resp_login.json()
-                    wait_seconds = err_json.get("extras", {}).get("wait_seconds", 60)
-                    time_left = err_json.get("extras", {}).get("time_left", "unknown")
-                    logger.warning(f"触发速率限制，需要等待 {time_left} ({wait_seconds}s)")
-                    self._rate_limit_wait = wait_seconds
-                except Exception:
-                    self._rate_limit_wait = 60
-                return "rate_limited"
-            else:
-                logger.error(f"登录失败，状态码: {resp_login.status_code}")
-                logger.error(resp_login.text[:200])
-                return False
-        except Exception as e:
-            logger.error(f"登录请求异常: {e}")
+            logger.error(f"无法访问登录页面: {e}")
             return False
 
-        self.print_connect_info()  # 打印连接信息
+        # Step 2: Fill in login form
+        logger.info("填写登录表单...")
+        try:
+            # Find and fill username field
+            username_input = self.page.ele("#login-account-name", timeout=10)
+            if not username_input:
+                username_input = self.page.ele("@name=login", timeout=5)
+            if not username_input:
+                logger.error("未找到用户名输入框")
+                return False
 
-        # Step 3: Pass cookies to DrissionPage
-        logger.info("同步 Cookie 到 DrissionPage...")
+            username_input.clear()
+            username_input.input(self.username)
+            self._wait(0.5, 1.5)
 
-        # Convert requests cookies to DrissionPage format
-        # Using standard requests.utils to parse cookiejar if possible, or manual extraction
-        # requests.Session().cookies is a specialized object, but might support standard iteration
+            # Find and fill password field
+            password_input = self.page.ele("#login-account-password", timeout=5)
+            if not password_input:
+                password_input = self.page.ele("@name=password", timeout=5)
+            if not password_input:
+                logger.error("未找到密码输入框")
+                return False
 
-        # We can iterate over the cookies manually if dict_from_cookiejar doesn't work perfectly
-        # or convert to dict first.
-        # Assuming requests behaves like requests:
+            password_input.clear()
+            password_input.input(self.password)
+            self._wait(0.5, 1.0)
+        except Exception as e:
+            logger.error(f"填写表单失败: {e}")
+            return False
 
-        cookies_dict = self.session.cookies.get_dict()
+        # Step 3: Click login button
+        logger.info("点击登录按钮...")
+        try:
+            login_btn = self.page.ele("#login-button", timeout=5)
+            if not login_btn:
+                login_btn = self.page.ele("@type=submit", timeout=3)
+            if not login_btn:
+                logger.error("未找到登录按钮")
+                return False
 
-        dp_cookies = []
-        for name, value in cookies_dict.items():
-            dp_cookies.append(
-                {
-                    "name": name,
-                    "value": value,
-                    "domain": ".linux.do",
-                    "path": "/",
-                }
-            )
+            login_btn.click()
+            time.sleep(random.uniform(3, 6))
+        except Exception as e:
+            logger.error(f"点击登录按钮失败: {e}")
+            return False
 
-        self.page.set.cookies(dp_cookies)
+        # Check for rate limiting or error messages in the page
+        try:
+            page_text = self.page.html or ""
+            if "rate limit" in page_text.lower() or "too many" in page_text.lower():
+                logger.warning("触发速率限制")
+                self._rate_limit_wait = 60
+                return "rate_limited"
+        except Exception:
+            pass
 
-        logger.info("Cookie 设置完成，导航至 linux.do...")
-        self.page.get(HOME_URL)
-
-        # Verify login with retry — cookie sync sometimes needs a page reload
+        # Step 4: Verify login
+        logger.info("验证登录状态...")
         for attempt in range(3):
             time.sleep(random.uniform(3, 7))
             try:
                 user_ele = self.page.ele("@id=current-user")
                 if user_ele:
                     logger.info("登录验证成功")
-                    return True
+                    break
             except Exception:
                 pass
 
             # Fallback check for avatar
-            if "avatar" in self.page.html:
-                logger.info("登录验证成功 (通过 avatar)")
-                return True
+            try:
+                if "avatar" in self.page.html:
+                    logger.info("登录验证成功 (通过 avatar)")
+                    break
+            except Exception:
+                pass
 
             if attempt < 2:
                 logger.warning(f"登录验证失败，第 {attempt + 1}/3 次尝试，刷新页面重试...")
@@ -337,6 +287,44 @@ class LinuxDoBrowser:
             else:
                 logger.error("登录验证失败 (3次尝试后仍未找到 current-user)")
                 return False
+
+        # Step 5: Get CSRF token via browser JS (stays in browser context, no Cloudflare issue)
+        logger.info("通过浏览器获取 CSRF token...")
+        try:
+            csrf_token = self.page.run_js("""
+                return fetch('/session/csrf', {
+                    headers: {'X-Requested-With': 'XMLHttpRequest'}
+                }).then(r => r.json()).then(d => d.csrf);
+            """)
+            if csrf_token:
+                self._csrf_token = csrf_token
+                logger.info(f"CSRF Token obtained: {csrf_token[:10]}...")
+            else:
+                logger.warning("未能获取 CSRF token (reply 功能将不可用)")
+        except Exception as e:
+            logger.warning(f"获取 CSRF token 失败: {e}")
+
+        # Step 6: Sync browser cookies to curl_cffi session (for reply API calls)
+        logger.info("同步 Cookie 到 API session...")
+        try:
+            browser_cookies = self.page.cookies()
+            for cookie in browser_cookies:
+                self.session.cookies.set(
+                    cookie.get("name", ""),
+                    cookie.get("value", ""),
+                    domain=cookie.get("domain", ".linux.do"),
+                )
+            logger.info(f"已同步 {len(browser_cookies)} 个 Cookie")
+        except Exception as e:
+            logger.warning(f"Cookie 同步失败: {e}")
+
+        self.print_connect_info()
+
+        # Navigate to homepage for browsing
+        self.page.get(HOME_URL)
+        self._wait(1, 3)
+
+        return True
 
     def browse_homepage(self):
         """Scroll the homepage a bit before clicking topics, like a real user."""
