@@ -136,7 +136,8 @@ class LinuxDoBrowser:
         ua = f"Mozilla/5.0 ({platformIdentifier}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36"
 
         # Pick a consistent impersonation for this session
-        self._impersonate = random.choice(["chrome133", "chrome134", "chrome136"])
+        # Use well-supported targets: "chrome" alias auto-resolves to latest available
+        self._impersonate = random.choice(["chrome", "chrome124", "chrome131"])
 
         # Randomize Accept-Language per account
         accept_lang = random.choice([
