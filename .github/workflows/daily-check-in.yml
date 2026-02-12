@@ -22,6 +22,11 @@ jobs:
       - name: Check Chrome version
         run: chrome --version
 
+      - name: Set up Cloudflare WARP
+        uses: fscarmen/warp-on-actions@v1.3.0
+        with:
+          stack: ipv4
+
       - name: Restore cookie cache
         uses: actions/cache@v4
         with:
@@ -80,6 +85,16 @@ jobs:
           name: results-job-${{ matrix.job_index }}
           path: results_job_*.json
           retention-days: 1
+
+      - name: Upload debug screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-job-${{ matrix.job_index }}
+          path: |
+            debug_*.png
+            debug_*.html
+          retention-days: 3
 
   summary:
     needs: checkin

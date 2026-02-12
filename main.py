@@ -259,6 +259,25 @@ class LinuxDoBrowser:
         time.sleep(t)
         return t
 
+    def _human_type(self, element, text):
+        """Type text character-by-character with random inter-key delays."""
+        element.clear()
+        for char in text:
+            element.input(char, clear=False)
+            time.sleep(random.uniform(0.05, 0.22))
+
+    def _save_debug_info(self, suffix="error"):
+        """Save screenshot + HTML of the current page for post-mortem debugging."""
+        try:
+            ts = datetime.now().strftime("%H%M%S")
+            base = f"debug_{self.trace_id}_{ts}_{suffix}"
+            self.page.get_screenshot(path=f"{base}.png", full_page=True)
+            with open(f"{base}.html", "w", encoding="utf-8") as f:
+                f.write(self.page.html or "")
+            self.log.info(f"Debug info saved: {base}.png / .html")
+        except Exception:
+            pass
+
     @property
     def _cookie_path(self):
         """Path to cached cookie file for this account."""
@@ -357,8 +376,7 @@ class LinuxDoBrowser:
                 self.log.error("未找到用户名输入框")
                 return False
 
-            username_input.clear()
-            username_input.input(self.username)
+            self._human_type(username_input, self.username)
             self._wait(0.5, 1.5)
 
             # Find and fill password field
@@ -369,8 +387,7 @@ class LinuxDoBrowser:
                 self.log.error("未找到密码输入框")
                 return False
 
-            password_input.clear()
-            password_input.input(self.password)
+            self._human_type(password_input, self.password)
             self._wait(0.5, 1.0)
         except Exception as e:
             self.log.error(f"填写表单失败: {e}")
@@ -594,6 +611,7 @@ class LinuxDoBrowser:
                 raise Exception(f"RATE_LIMITED:{getattr(self, '_rate_limit_wait', 60)}")
             if not login_res:
                 self.log.warning("登录验证失败，跳过浏览")
+                self._save_debug_info("login_failed")
                 return
 
             self.login_success = True
@@ -612,6 +630,7 @@ class LinuxDoBrowser:
                     click_topic_res = self.click_topic()
                     if not click_topic_res:
                         self.log.error("点击主题失败，程序终止")
+                        self._save_debug_info("click_topic_failed")
                         return
                     self.log.info("完成浏览任务")
 
