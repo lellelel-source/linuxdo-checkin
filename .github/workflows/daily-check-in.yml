@@ -53,6 +53,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           BROWSE_ENABLED: ${{ secrets.BROWSE_ENABLED }}
+          REPLY_ENABLED: ${{ secrets.REPLY_ENABLED }}
           BATCH_SIZE: ${{ secrets.BATCH_SIZE }}
           ACCOUNT_DELAY: ${{ secrets.ACCOUNT_DELAY }}
           EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}

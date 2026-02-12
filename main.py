@@ -7,8 +7,10 @@ import os
 import random
 import time
 import json
+import hashlib
 import functools
 import threading
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from loguru import logger
 from DrissionPage import ChromiumOptions, Chromium
@@ -53,6 +55,47 @@ BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in
     "0",
     "off",
 ]
+
+REPLY_ENABLED = os.environ.get("REPLY_ENABLED", "false").strip().lower() in [
+    "true",
+    "1",
+    "on",
+]
+
+# Beijing timezone (UTC+8)
+_BJT = timezone(timedelta(hours=8))
+
+
+def should_read_bookmarks_today(username: str) -> bool:
+    """Decide if this account should read from bookmarks in this run.
+
+    Each account reads bookmarks on 1-3 random days per week (deterministic).
+    Only triggers in the account's assigned run slot (morning/evening).
+    """
+    now_bjt = datetime.now(_BJT)
+    week_number = now_bjt.isocalendar()[1]
+    weekday = now_bjt.weekday()  # 0=Mon..6=Sun
+
+    # Pick 1-3 days this week, seeded by username + week
+    seed = int(hashlib.md5(f"bookmark:{username}:{week_number}".encode()).hexdigest(), 16)
+    rng = random.Random(seed)
+    count = rng.randint(1, 3)
+    days = sorted(rng.sample(range(7), count))
+
+    if weekday not in days:
+        return False
+
+    # Morning/evening slot — same slot the account uses for replies
+    h = int(hashlib.md5(username.encode()).hexdigest(), 16)
+    assigned_slot = "morning" if h % 2 == 0 else "evening"
+    utc_hour = datetime.now(timezone.utc).hour
+    current_slot = "morning" if utc_hour < 10 else "evening"
+
+    if assigned_slot != current_slot:
+        return False
+
+    logger.info(f"[Bookmark] {username}: should read bookmarks today (day={weekday}, slot={current_slot})")
+    return True
 
 # Randomized Chrome versions for varied fingerprints
 CHROME_VERSIONS = [
@@ -166,6 +209,7 @@ class LinuxDoBrowser:
             return False        
         csrf_data = resp_csrf.json()
         csrf_token = csrf_data.get("csrf")
+        self._csrf_token = csrf_token  # Store for reply_engine reuse
         logger.info(f"CSRF Token obtained: {csrf_token[:10]}...")
 
         # Step 2: Login
@@ -311,12 +355,23 @@ class LinuxDoBrowser:
                 self._wait(1, 3)
                 return
 
-            like_timing = random.choice(["before", "during", "after", "none", "none", "none", "none"])
+            # 20% chance to like a post — split across before/during/after for natural timing
+            should_like = random.random() < 0.20
+            like_timing = random.choice(["before", "during", "after"]) if should_like else "none"
             if like_timing == "before":
                 self.click_like(new_page)
+
+            # 10% chance to bookmark — decided before browsing, executed after
+            should_bookmark = random.random() < 0.10
+
             self.browse_post(new_page, like_during=(like_timing == "during"))
+
             if like_timing == "after":
                 self.click_like(new_page)
+
+            # Bookmark after reading — most natural moment to save a post
+            if should_bookmark:
+                self.click_bookmark(new_page)
         finally:
             try:
                 new_page.close()
@@ -372,6 +427,7 @@ class LinuxDoBrowser:
             logger.info(f"等待 {wait_time:.2f} 秒...")
 
     def run(self):
+        self.reply_result = None  # Track reply result (dict or None)
         try:
             login_res = self.login()
             if login_res == "rate_limited":
@@ -397,11 +453,29 @@ class LinuxDoBrowser:
                         return
                     logger.info("完成浏览任务")
 
+                    # Read from bookmarks on scheduled days (1-3 days/week)
+                    if should_read_bookmarks_today(self.username):
+                        self.read_from_bookmarks()
+
                     # Sometimes check notifications after browsing too (~15%)
                     if random.random() < 0.15:
                         self.visit_side_page()
 
             self.send_notifications(BROWSE_ENABLED)  # 发送通知
+
+            # Auto-reply phase (after browse, gated by REPLY_ENABLED)
+            if REPLY_ENABLED:
+                try:
+                    from reply_engine import execute_reply
+                    self.reply_result = execute_reply(
+                        self,
+                        bot_usernames=getattr(self, "_bot_usernames", set()),
+                        used_topics=getattr(self, "_used_topics", set()),
+                        used_phrases=getattr(self, "_used_phrases", set()),
+                    )
+                except Exception as e:
+                    logger.error(f"[Reply] Reply phase failed: {e}")
+                    self.reply_result = None
         finally:
             try:
                 self.page.close()
@@ -438,17 +512,104 @@ class LinuxDoBrowser:
 
     def click_like(self, page):
         try:
-            # 专门查找未点赞的按钮
             like_button = page.ele(".discourse-reactions-reaction-button")
             if like_button:
                 logger.info("找到未点赞的帖子，准备点赞")
+                # Simulate hovering over the button before clicking
+                like_button.hover()
+                self._wait(0.5, 1.5)
                 like_button.click()
                 logger.info("点赞成功")
-                time.sleep(random.uniform(1, 2))
+                # Variable post-click pause — sometimes people linger, sometimes move on
+                self._wait(0.8, 2.5)
             else:
                 logger.info("帖子可能已经点过赞了")
         except Exception as e:
             logger.error(f"点赞失败: {str(e)}")
+
+    def click_bookmark(self, page):
+        """Bookmark the first post in the topic, like a user saving it for later."""
+        try:
+            # Discourse bookmark button: .bookmark on the first post,
+            # or the topic-level bookmark in footer buttons
+            bookmark_btn = page.ele(".topic-footer-main-buttons .bookmark", timeout=3)
+            if not bookmark_btn:
+                bookmark_btn = page.ele("button.bookmark", timeout=2)
+            if not bookmark_btn:
+                logger.info("未找到书签按钮，跳过收藏")
+                return
+
+            # Scroll the button into view first — real users scroll to the bottom area
+            page.run_js("document.querySelector('.topic-footer-main-buttons')?.scrollIntoView({behavior:'smooth',block:'center'})")
+            self._wait(0.8, 2.0)
+
+            bookmark_btn.hover()
+            self._wait(0.4, 1.2)
+            bookmark_btn.click()
+            logger.info("收藏帖子成功")
+
+            # Sometimes the bookmark menu pops up — just wait and dismiss
+            self._wait(1.0, 2.5)
+
+            # If a bookmark popup/modal appeared, click the save/confirm button
+            try:
+                save_btn = page.ele("button.btn-primary.bookmark-save", timeout=2)
+                if save_btn:
+                    save_btn.click()
+                    logger.info("确认收藏成功")
+                    self._wait(0.5, 1.5)
+            except Exception:
+                pass  # No popup — bookmark was toggled directly
+        except Exception as e:
+            logger.error(f"收藏失败: {str(e)}")
+
+    def read_from_bookmarks(self):
+        """Visit the bookmarks page and read one bookmarked topic, like revisiting saved content."""
+        logger.info("[Bookmark] 访问书签列表...")
+        try:
+            self.page.get("https://linux.do/bookmarks")
+            self._wait(2, 5)
+
+            # Scroll the bookmark list a bit — scanning what we saved
+            if random.random() < 0.6:
+                scroll = random.randint(200, 500)
+                self.page.run_js(f"window.scrollBy({{top: {scroll}, behavior: 'smooth'}})")
+                self._wait(1.5, 3)
+
+            # Find bookmarked topic links
+            bookmark_links = self.page.eles("css:.bookmark-list .topic-link a") or \
+                             self.page.eles("css:.topic-list-item .link-top-line a") or \
+                             self.page.eles("css:a.title")
+
+            if not bookmark_links:
+                logger.info("[Bookmark] 书签列表为空或未找到帖子链接")
+                self.page.get(HOME_URL)
+                self._wait(1, 3)
+                return
+
+            # Pick one random bookmarked topic
+            target = random.choice(bookmark_links)
+            topic_url = target.attr("href")
+            topic_title = target.text.strip()
+            logger.info(f"[Bookmark] 从书签中选择帖子: {topic_title}")
+
+            # Pause before clicking — scanning the list, deciding which to re-read
+            self._wait(1, 3)
+
+            # Open and browse the bookmarked topic in a new tab, reusing existing browse logic
+            self.click_one_topic(topic_url)
+
+            logger.info("[Bookmark] 书签帖子阅读完成")
+
+            # Return to homepage
+            self.page.get(HOME_URL)
+            self._wait(1, 3)
+        except Exception as e:
+            logger.warning(f"[Bookmark] 阅读书签帖子失败: {e}")
+            try:
+                self.page.get(HOME_URL)
+            except Exception:
+                pass
 
     def print_connect_info(self):
         logger.info("获取连接信息")
@@ -558,7 +719,14 @@ if __name__ == "__main__":
     total = len(accounts)
     success_list = []
     fail_list = []
+    replied_accounts = []  # List of dicts with reply details
     rate_limited_queue = []  # accounts to retry after rate limit
+
+    # Build set of bot usernames for reply anti-sockpuppet filtering
+    bot_usernames = {a.get("username", "") for a in all_accounts if a.get("username")}
+    # Shared sets within this job to prevent same-IP collisions
+    used_topics = set()
+    used_phrases = set()
 
     # Process accounts one by one with delay to avoid rate limiting
     ACCOUNT_DELAY = int(os.environ.get("ACCOUNT_DELAY") or "60")  # seconds between accounts
@@ -575,8 +743,13 @@ if __name__ == "__main__":
         logger.info(f"========== [{i}/{total}] Processing: {username} ==========")
         try:
             browser = LinuxDoBrowser(username, password)
+            browser._bot_usernames = bot_usernames
+            browser._used_topics = used_topics
+            browser._used_phrases = used_phrases
             browser.run()
             success_list.append(username)
+            if browser.reply_result:
+                replied_accounts.append(browser.reply_result)
             logger.success(f"[{i}/{total}] Account {username} completed successfully")
         except Exception as e:
             error_msg = str(e)
@@ -612,8 +785,13 @@ if __name__ == "__main__":
             logger.info(f"========== [Retry {i}/{len(rate_limited_queue)}] Processing: {username} ==========")
             try:
                 browser = LinuxDoBrowser(username, password)
+                browser._bot_usernames = bot_usernames
+                browser._used_topics = used_topics
+                browser._used_phrases = used_phrases
                 browser.run()
                 success_list.append(username)
+                if browser.reply_result:
+                    replied_accounts.append(browser.reply_result)
                 logger.success(f"[Retry {i}] Account {username} completed successfully")
             except Exception as e:
                 logger.error(f"[Retry {i}] Account {username} failed: {e}")
@@ -625,11 +803,14 @@ if __name__ == "__main__":
                 time.sleep(delay)
 
     logger.info("========== Summary ==========")
-    logger.info(f"Total: {total} | Success: {len(success_list)} | Failed: {len(fail_list)}")
+    logger.info(f"Total: {total} | Success: {len(success_list)} | Failed: {len(fail_list)} | Replies: {len(replied_accounts)}")
     if success_list:
         logger.success(f"Successful accounts: {', '.join(success_list)}")
     if fail_list:
         logger.warning(f"Failed accounts: {', '.join(fail_list)}")
+    if replied_accounts:
+        for r in replied_accounts:
+            logger.info(f"  Reply: {r['username']} -> [{r['topic_id']}] {r['topic_title']}")
 
     # Save results to JSON file for the summary job to collect
     results = {
@@ -637,6 +818,7 @@ if __name__ == "__main__":
         "total": total,
         "success": success_list,
         "fail": fail_list,
+        "replied_accounts": replied_accounts,
     }
     results_file = f"results_job_{JOB_INDEX}.json"
     with open(results_file, "w", encoding="utf-8") as f:
