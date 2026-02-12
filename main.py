@@ -292,6 +292,8 @@ class LinuxDoBrowser:
         self.like_attempts = 0
         # 初始化通知管理器
         self.notifier = NotificationManager()
+        # Connect info (trust level + stats table from connect.linux.do)
+        self.connect_info = None
 
     def _wait(self, base_min, base_max):
         """Sleep for a personality-adjusted random duration."""
@@ -525,6 +527,7 @@ class LinuxDoBrowser:
             self.log.warning(f"Cookie 同步失败: {e}")
 
         self.print_connect_info()
+        self._fetch_trust_level()
 
         # Navigate to homepage for browsing
         self.page.get(HOME_URL)
@@ -914,6 +917,13 @@ class LinuxDoBrowser:
                     table_data = json.loads(info)
                     print("--------------Connect Info-----------------")
                     print(tabulate(table_data, headers=["项目", "当前", "要求"], tablefmt="pretty"))
+                    # Store for results JSON and email summary
+                    self.connect_info = {
+                        "table": [
+                            {"item": row[0], "current": row[1], "requirement": row[2]}
+                            for row in table_data
+                        ]
+                    }
                 else:
                     print("--------------Connect Info-----------------")
                     print("(no data)")
@@ -924,6 +934,26 @@ class LinuxDoBrowser:
                     pass
         except Exception as e:
             self.log.warning(f"获取连接信息失败: {e}")
+
+    def _fetch_trust_level(self):
+        """Fetch user trust_level from Discourse /users/{username}.json API."""
+        try:
+            result = self.page.run_js(f"""
+                return fetch('/users/{self.username}.json', {{
+                    headers: {{'X-Requested-With': 'XMLHttpRequest'}}
+                }}).then(r => r.ok ? r.text() : '');
+            """)
+            if result:
+                data = json.loads(result)
+                user_data = data.get("user", {})
+                trust_level = user_data.get("trust_level")
+                if trust_level is not None:
+                    self.log.info(f"Trust level: {trust_level}")
+                    if self.connect_info is None:
+                        self.connect_info = {}
+                    self.connect_info["trust_level"] = trust_level
+        except Exception as e:
+            self.log.warning(f"获取信任等级失败: {e}")
 
     def send_notifications(self, browse_enabled):
         """发送签到通知"""
@@ -1019,6 +1049,7 @@ if __name__ == "__main__":
     fail_list = []
     replied_accounts = []  # List of dicts with reply details
     like_stats = {}  # username -> {count, attempts}
+    connect_infos = {}  # username -> {trust_level, table: [{item, current, requirement}, ...]}
     rate_limited_queue = []  # accounts to retry after rate limit
 
     # Build set of bot usernames for reply anti-sockpuppet filtering
@@ -1066,6 +1097,8 @@ if __name__ == "__main__":
                     replied_accounts.append(browser.reply_result)
                 if browser.like_count > 0 or browser.like_attempts > 0:
                     like_stats[username] = {"count": browser.like_count, "attempts": browser.like_attempts}
+                if browser.connect_info:
+                    connect_infos[username] = browser.connect_info
                 logger.success(f"[{i}/{total}] Account {username} completed successfully (likes: {browser.like_count}/{browser.like_attempts})")
             else:
                 fail_list.append(username)
@@ -1115,6 +1148,8 @@ if __name__ == "__main__":
                         replied_accounts.append(browser.reply_result)
                     if browser.like_count > 0 or browser.like_attempts > 0:
                         like_stats[username] = {"count": browser.like_count, "attempts": browser.like_attempts}
+                    if browser.connect_info:
+                        connect_infos[username] = browser.connect_info
                     logger.success(f"[Retry {i}] Account {username} completed successfully (likes: {browser.like_count}/{browser.like_attempts})")
                 else:
                     fail_list.append(username)
@@ -1146,6 +1181,7 @@ if __name__ == "__main__":
         "fail": fail_list,
         "replied_accounts": replied_accounts,
         "like_stats": like_stats,
+        "connect_infos": connect_infos,
     }
     results_file = f"results_job_{JOB_INDEX}.json"
     with open(results_file, "w", encoding="utf-8") as f:
