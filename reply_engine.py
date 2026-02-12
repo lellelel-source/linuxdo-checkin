@@ -5,6 +5,7 @@ Replies use preset natural Chinese phrases from REPLY_POOL.
 """
 
 import hashlib
+import json
 import random
 import time
 from datetime import datetime, timezone, timedelta
@@ -95,21 +96,23 @@ def should_reply_today(username: str) -> bool:
     return True
 
 
-def select_topic(session, bot_usernames: set, impersonate: str) -> Optional[Dict]:
+def select_topic(page, bot_usernames: set) -> Optional[Dict]:
     """Fetch recent topics and pick one suitable for replying.
 
+    Uses browser JS fetch to bypass Cloudflare.
     Returns dict with 'id' and 'title', or None if no suitable topic found.
     """
     try:
-        resp = session.get(
-            "https://linux.do/latest.json",
-            impersonate=impersonate,
-        )
-        if resp.status_code != 200:
-            logger.warning(f"[Reply] Failed to fetch /latest.json: {resp.status_code}")
+        result = page.run_js("""
+            return fetch('/latest.json', {
+                headers: {'X-Requested-With': 'XMLHttpRequest'}
+            }).then(r => r.ok ? r.text() : '');
+        """)
+        if not result:
+            logger.warning("[Reply] Failed to fetch /latest.json via browser")
             return None
 
-        data = resp.json()
+        data = json.loads(result)
         topics = data.get("topic_list", {}).get("topics", [])
     except Exception as e:
         logger.error(f"[Reply] Error fetching topics: {e}")
@@ -170,17 +173,18 @@ def select_topic(session, bot_usernames: set, impersonate: str) -> Optional[Dict
     return chosen
 
 
-def _check_already_replied(session, topic_id: int, username: str, impersonate: str) -> bool:
+def _check_already_replied(page, topic_id: int, username: str) -> bool:
     """Check if the current user already replied to this topic."""
     try:
-        resp = session.get(
-            f"https://linux.do/t/{topic_id}.json",
-            impersonate=impersonate,
-        )
-        if resp.status_code != 200:
+        result = page.run_js(f"""
+            return fetch('/t/{topic_id}.json', {{
+                headers: {{'X-Requested-With': 'XMLHttpRequest'}}
+            }}).then(r => r.ok ? r.text() : '');
+        """)
+        if not result:
             return False
 
-        data = resp.json()
+        data = json.loads(result)
         post_stream = data.get("post_stream", {})
         posts = post_stream.get("posts", [])
         for post in posts:
@@ -191,8 +195,8 @@ def _check_already_replied(session, topic_id: int, username: str, impersonate: s
     return False
 
 
-def post_reply(session, topic_id: int, text: str, csrf_token: str, impersonate: str) -> bool:
-    """Post a reply to a topic via Discourse API."""
+def post_reply(page, topic_id: int, text: str, csrf_token: str) -> bool:
+    """Post a reply to a topic via browser JS fetch to bypass Cloudflare."""
     typing_duration = random.randint(5000, 15000)
     composer_duration = random.randint(10000, 30000)
 
@@ -209,26 +213,39 @@ def post_reply(session, topic_id: int, text: str, csrf_token: str, impersonate: 
         "nested_post": True,
     }
 
-    headers = {
-        "X-CSRF-Token": csrf_token,
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/json",
-    }
+    # Escape the payload for JS
+    payload_json = json.dumps(payload, ensure_ascii=False)
 
     try:
-        resp = session.post(
-            "https://linux.do/posts.json",
-            json=payload,
-            headers=headers,
-            impersonate=impersonate,
-        )
-        if resp.status_code == 200:
-            post_data = resp.json()
-            post_id = post_data.get("id", "?")
-            logger.success(f"[Reply] Posted successfully! post_id={post_id}, topic_id={topic_id}")
+        result = page.run_js(f"""
+            return fetch('/posts.json', {{
+                method: 'POST',
+                headers: {{
+                    'X-CSRF-Token': '{csrf_token}',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Content-Type': 'application/json'
+                }},
+                body: JSON.stringify({payload_json})
+            }}).then(r => r.text().then(t => JSON.stringify({{status: r.status, body: t}})));
+        """)
+        if not result:
+            logger.error("[Reply] Post failed: no response from browser fetch")
+            return False
+
+        resp = json.loads(result)
+        status = resp.get("status", 0)
+        body = resp.get("body", "")
+
+        if status == 200:
+            try:
+                post_data = json.loads(body)
+                post_id = post_data.get("id", "?")
+                logger.success(f"[Reply] Posted successfully! post_id={post_id}, topic_id={topic_id}")
+            except Exception:
+                logger.success(f"[Reply] Posted successfully! topic_id={topic_id}")
             return True
         else:
-            logger.error(f"[Reply] Post failed: {resp.status_code} - {resp.text[:200]}")
+            logger.error(f"[Reply] Post failed: {status} - {body[:200]}")
             return False
     except Exception as e:
         logger.error(f"[Reply] Post request error: {e}")
@@ -240,7 +257,7 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
     """Main entry point: decide whether to reply and do it.
 
     Args:
-        browser: LinuxDoBrowser instance (needs .session, ._impersonate, .username, ._csrf_token)
+        browser: LinuxDoBrowser instance (needs .page, .username, ._csrf_token)
         bot_usernames: set of usernames belonging to bot accounts (for filtering)
         used_topics: set of topic IDs already replied to in this job (anti-same-IP detection)
         used_phrases: set of phrases already used in this job (anti-duplicate detection)
@@ -264,8 +281,10 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
         logger.warning(f"[Reply] {username}: no CSRF token available, skipping reply")
         return None
 
-    # Select a topic
-    topic = select_topic(browser.session, bot_usernames, browser._impersonate)
+    page = browser.page
+
+    # Select a topic (uses browser JS fetch)
+    topic = select_topic(page, bot_usernames)
     if not topic:
         return None
 
@@ -277,8 +296,8 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
         logger.info(f"[Reply] {username}: topic {topic_id} already used by another account in this job, skipping")
         return None
 
-    # Check if we already replied to this topic
-    if _check_already_replied(browser.session, topic_id, username, browser._impersonate):
+    # Check if we already replied to this topic (uses browser JS fetch)
+    if _check_already_replied(page, topic_id, username):
         logger.info(f"[Reply] {username}: already replied to topic {topic_id}, skipping")
         return None
 
@@ -290,9 +309,7 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
 
     logger.info(f"[Reply] {username}: replying to topic {topic_id} with: {reply_text}")
 
-    success = post_reply(
-        browser.session, topic_id, reply_text, csrf_token, browser._impersonate
-    )
+    success = post_reply(page, topic_id, reply_text, csrf_token)
 
     if success:
         used_topics.add(topic_id)

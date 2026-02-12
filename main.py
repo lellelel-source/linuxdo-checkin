@@ -524,16 +524,24 @@ class LinuxDoBrowser:
 
     def click_like(self, page):
         try:
-            like_button = page.ele(".discourse-reactions-reaction-button")
+            # Re-query the element fresh each time to avoid stale references
+            # after dynamic page updates from scrolling
+            like_button = page.ele(".discourse-reactions-reaction-button", timeout=3)
             if like_button:
                 logger.info("找到未点赞的帖子，准备点赞")
-                # Simulate hovering over the button before clicking
-                like_button.hover()
-                self._wait(0.5, 1.5)
-                like_button.click()
-                logger.info("点赞成功")
-                # Variable post-click pause — sometimes people linger, sometimes move on
-                self._wait(0.8, 2.5)
+                # Scroll the button into view first to avoid stale element issues
+                page.run_js("document.querySelector('.discourse-reactions-reaction-button')?.scrollIntoView({behavior:'smooth',block:'center'})")
+                self._wait(0.5, 1.0)
+                # Re-query after scroll to get fresh reference
+                like_button = page.ele(".discourse-reactions-reaction-button", timeout=3)
+                if like_button:
+                    like_button.hover()
+                    self._wait(0.5, 1.5)
+                    like_button.click()
+                    logger.info("点赞成功")
+                    self._wait(0.8, 2.5)
+                else:
+                    logger.info("点赞按钮刷新后消失")
             else:
                 logger.info("帖子可能已经点过赞了")
         except Exception as e:
