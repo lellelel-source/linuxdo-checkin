@@ -6,6 +6,7 @@ Replies use preset natural Chinese phrases from REPLY_POOL.
 
 import hashlib
 import json
+import os
 import random
 import time
 from datetime import datetime, timezone, timedelta
@@ -52,6 +53,42 @@ REPLY_POOL = [
 
 # Beijing timezone (UTC+8)
 _BJT = timezone(timedelta(hours=8))
+
+
+def generate_semantic_reply(title: str) -> Optional[str]:
+    """Use Gemini Flash to generate a context-aware reply based on topic title.
+
+    Returns the generated text, or None if API key is missing or call fails.
+    Fallback to REPLY_POOL is handled by the caller.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+
+        prompt = (
+            f"你是一个热心的技术论坛用户。请根据帖子标题《{title}》，"
+            "写一句简短、自然、友善的中文评论。"
+            "要求：1. 不要带引号 2. 不要是机器人口吻 "
+            "3. 字数在 10-30 字之间 4. 可以适当带一点幽默或鼓励。"
+            "只输出评论内容，不要有任何前缀或解释。"
+        )
+
+        response = model.generate_content(prompt)
+        reply_text = response.text.strip().strip('"\'')
+
+        if not reply_text or len(reply_text) < 5:
+            return None
+
+        logger.info(f"[AI Reply] Generated: {reply_text}")
+        return reply_text
+    except Exception as e:
+        logger.warning(f"[AI Reply] Gemini call failed: {e}")
+        return None
 
 
 def get_reply_run(username: str) -> str:
@@ -339,13 +376,19 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
         logger.info(f"[Reply] {username}: already replied to topic {topic_id}, skipping")
         return None
 
-    # Pick a phrase that hasn't been used by another account in this job
-    available_phrases = [p for p in REPLY_POOL if p not in used_phrases]
-    if not available_phrases:
-        available_phrases = list(REPLY_POOL)  # fallback: reuse if all 30 are used
-    reply_text = random.choice(available_phrases)
+    # Generate reply text: try Gemini AI first, fall back to REPLY_POOL
+    reply_text = generate_semantic_reply(topic_title)
+    is_ai = reply_text is not None
 
-    logger.info(f"[Reply] {username}: replying to topic {topic_id} with: {reply_text}")
+    if not reply_text:
+        # Fallback: pick a phrase that hasn't been used by another account in this job
+        available_phrases = [p for p in REPLY_POOL if p not in used_phrases]
+        if not available_phrases:
+            available_phrases = list(REPLY_POOL)
+        reply_text = random.choice(available_phrases)
+
+    source = "AI" if is_ai else "pool"
+    logger.info(f"[Reply] {username}: replying to topic {topic_id} ({source}): {reply_text}")
 
     success = post_reply(page, topic_id, reply_text, csrf_token)
 

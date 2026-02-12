@@ -75,6 +75,7 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           JOB_INDEX: ${{ matrix.job_index }}
           JOB_TOTAL: 8
         run: |
