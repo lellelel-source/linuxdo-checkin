@@ -287,6 +287,9 @@ class LinuxDoBrowser:
             }
         )
         self._accept_lang = accept_lang
+        # Like tracking counters
+        self.like_count = 0
+        self.like_attempts = 0
         # 初始化通知管理器
         self.notifier = NotificationManager()
 
@@ -731,40 +734,51 @@ class LinuxDoBrowser:
             self.log.warning(f"访问{name}失败: {e}")
 
     def click_like(self, page):
+        self.like_attempts += 1
         try:
-            # Use pure JS to find and click the like button — avoids stale element issues
-            # from Discourse's Ember.js re-rendering during scroll
+            # Phase 1: discover all unliked buttons, weighted-random pick, scroll to it
             result = page.run_js("""
-                // Try reaction button first, then standard like button
-                const btn = document.querySelector('.discourse-reactions-reaction-button')
-                           || document.querySelector('button.toggle-like')
-                           || document.querySelector('.like-button');
-                if (!btn) return 'not_found';
-                // Check if already liked (has .has-like or .liked class)
-                if (btn.classList.contains('has-like') || btn.classList.contains('liked')) return 'already_liked';
-                btn.scrollIntoView({behavior: 'smooth', block: 'center'});
-                return 'found';
+                const allBtns = Array.from(document.querySelectorAll(
+                    '.discourse-reactions-reaction-button, button.toggle-like, .like-button'
+                ));
+                const unliked = allBtns.filter(btn =>
+                    !btn.classList.contains('has-like') && !btn.classList.contains('liked'));
+                if (unliked.length === 0) return allBtns.length === 0 ? 'not_found' : 'all_liked';
+                // Weighted random: earlier posts get higher weight
+                const weights = unliked.map((_, i) => unliked.length - i);
+                const total = weights.reduce((a, b) => a + b, 0);
+                let r = Math.random() * total;
+                let idx = 0;
+                for (let i = 0; i < weights.length; i++) { r -= weights[i]; if (r <= 0) { idx = i; break; } }
+                window.__likeTarget = unliked[idx];
+                window.__likeTarget.scrollIntoView({behavior: 'smooth', block: 'center'});
+                return 'found:' + (idx+1) + '/' + unliked.length;
             """)
 
             if result == 'not_found':
                 self.log.info("未找到点赞按钮")
                 return
-            if result == 'already_liked':
-                self.log.info("帖子已经点过赞了")
+            if result == 'all_liked':
+                self.log.info("所有帖子已点过赞了")
                 return
 
-            self.log.info("找到未点赞的帖子，准备点赞")
+            self.log.info(f"准备点赞 ({result})")
             self._wait(0.5, 1.5)
 
-            # Click via JS — immune to stale element references
+            # Phase 2: click the stored target with fallback
             clicked = page.run_js("""
+                if (window.__likeTarget) {
+                    try { window.__likeTarget.click(); window.__likeTarget = null; return true; } catch(e) {}
+                }
+                // Fallback to first available
                 const btn = document.querySelector('.discourse-reactions-reaction-button')
-                           || document.querySelector('button.toggle-like')
-                           || document.querySelector('.like-button');
-                if (btn) { btn.click(); return true; }
+                    || document.querySelector('button.toggle-like') || document.querySelector('.like-button');
+                if (btn && !btn.classList.contains('has-like') && !btn.classList.contains('liked'))
+                    { btn.click(); return true; }
                 return false;
             """)
             if clicked:
+                self.like_count += 1
                 self.log.info("点赞成功")
                 self._wait(0.8, 2.5)
             else:
@@ -1004,6 +1018,7 @@ if __name__ == "__main__":
     success_list = []
     fail_list = []
     replied_accounts = []  # List of dicts with reply details
+    like_stats = {}  # username -> {count, attempts}
     rate_limited_queue = []  # accounts to retry after rate limit
 
     # Build set of bot usernames for reply anti-sockpuppet filtering
@@ -1049,7 +1064,9 @@ if __name__ == "__main__":
                 _mark_done(JOB_INDEX, username, daily_status)
                 if browser.reply_result:
                     replied_accounts.append(browser.reply_result)
-                logger.success(f"[{i}/{total}] Account {username} completed successfully")
+                if browser.like_count > 0 or browser.like_attempts > 0:
+                    like_stats[username] = {"count": browser.like_count, "attempts": browser.like_attempts}
+                logger.success(f"[{i}/{total}] Account {username} completed successfully (likes: {browser.like_count}/{browser.like_attempts})")
             else:
                 fail_list.append(username)
                 logger.warning(f"[{i}/{total}] Account {username} login failed")
@@ -1096,7 +1113,9 @@ if __name__ == "__main__":
                     _mark_done(JOB_INDEX, username, daily_status)
                     if browser.reply_result:
                         replied_accounts.append(browser.reply_result)
-                    logger.success(f"[Retry {i}] Account {username} completed successfully")
+                    if browser.like_count > 0 or browser.like_attempts > 0:
+                        like_stats[username] = {"count": browser.like_count, "attempts": browser.like_attempts}
+                    logger.success(f"[Retry {i}] Account {username} completed successfully (likes: {browser.like_count}/{browser.like_attempts})")
                 else:
                     fail_list.append(username)
                     logger.warning(f"[Retry {i}] Account {username} login failed")
@@ -1126,6 +1145,7 @@ if __name__ == "__main__":
         "success": success_list,
         "fail": fail_list,
         "replied_accounts": replied_accounts,
+        "like_stats": like_stats,
     }
     results_file = f"results_job_{JOB_INDEX}.json"
     with open(results_file, "w", encoding="utf-8") as f:

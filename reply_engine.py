@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Set
@@ -22,6 +23,8 @@ REPLY_POOL = [
     "前排占座，支持楼主",
     "每天都来报个到",
     "打卡签到，顺便支持",
+    "准时报到，风雨无阻",
+    "日常签到，顺手点赞",
     # Supportive style
     "感谢分享，收藏了",
     "好东西，马克一下",
@@ -31,6 +34,8 @@ REPLY_POOL = [
     "感谢楼主无私分享",
     "涨知识了，谢谢分享",
     "大佬出品，必属精品",
+    "写得很用心，感谢分享",
+    "干货满满，必须收藏",
     # Discussion style
     "不错不错，持续关注",
     "看看有什么新东西",
@@ -38,6 +43,8 @@ REPLY_POOL = [
     "路过看看，顺便支持",
     "好帖必须顶一下",
     "一直在关注这个方向",
+    "思路很清晰，赞一个",
+    "这个话题值得深入讨论",
     # Casual style
     "刚好需要，太及时了",
     "这个值得收藏起来",
@@ -49,16 +56,58 @@ REPLY_POOL = [
     "正好在找这个，谢了",
     "持续关注中，期待后续",
     "不明觉厉，先收藏了",
+    "刷论坛看到好帖，留个脚印",
+    "这个帖子来得正是时候",
+    # Question style (NEW)
+    "请问有后续更新计划吗",
+    "这个方案在生产环境验证过吗",
+    "想问下性能表现怎么样",
+    "有没有更详细的教程链接",
+    "好奇这个是怎么实现的",
+    # Humor style (NEW)
+    "膜拜大佬，我先跪了",
+    "看完感觉自己又行了",
+    "先收藏，指不定哪天用上",
+    "默默点赞然后溜了",
+    "我什么时候才能写出这种东西",
+    "这波操作我给满分",
+    "实名羡慕，什么时候能教教我",
 ]
 
 # Beijing timezone (UTC+8)
 _BJT = timezone(timedelta(hours=8))
 
+# LinuxDo category ID -> display name (used to give AI board-specific context)
+CATEGORY_MAP = {
+    1: "bug反馈",
+    2: "功能",
+    4: "一般讨论",
+    5: "扯淡闲聊",
+    7: "开发调优",
+    10: "文档",
+    11: "资源荟萃",
+    13: "跳蚤市场",
+    14: "非我莫属",
+    15: "深度学习",
+    17: "运营反馈",
+    19: "福利羊毛",
+    22: "搞七捻三",
+    24: "靠谱推荐",
+    25: "前沿快讯",
+    27: "LINUX DO Wiki",
+    28: "插件开发",
+    34: "读书会",
+    35: "AI探索",
+    36: "起始页",
+}
 
-def generate_semantic_reply(title: str) -> Optional[str]:
-    """Use Gemini Flash to generate a context-aware reply based on topic title.
+
+def generate_semantic_reply(title: str, content_excerpt: str = "",
+                            category_name: str = "") -> Optional[str]:
+    """Use Gemini Flash to generate a context-aware reply based on topic title and content.
 
     Returns the generated text, or None if API key is missing or call fails.
+    Returns "SKIP" if AI determines the post is too negative for a casual reply.
     Fallback to REPLY_POOL is handled by the caller.
     """
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -69,11 +118,16 @@ def generate_semantic_reply(title: str) -> Optional[str]:
         from google import genai
         client = genai.Client(api_key=api_key)
 
+        context_part = f"\n帖子内容摘要：{content_excerpt}\n" if content_excerpt else ""
+        category_part = f"这是一个发布在【{category_name}】板块的帖子。" if category_name else ""
         prompt = (
-            f"你是一个热心的技术论坛用户。请根据帖子标题《{title}》，"
+            f"你是一个热心的技术论坛用户。{category_part}"
+            f"请根据帖子标题《{title}》，{context_part}"
             "写一句简短、自然、友善的中文评论。"
             "要求：1. 不要带引号 2. 不要是机器人口吻 "
-            "3. 字数在 10-30 字之间 4. 可以适当带一点幽默或鼓励。"
+            "3. 字数在 10-30 字之间 4. 可以适当带一点幽默或鼓励 "
+            "5. 如果帖子内容包含强烈的负面情绪（如愤怒、悲伤、抱怨、骂人），"
+            "请只输出 SKIP（不要回复这种帖子）。"
             "只输出评论内容，不要有任何前缀或解释。"
         )
 
@@ -82,6 +136,11 @@ def generate_semantic_reply(title: str) -> Optional[str]:
             contents=prompt,
         )
         reply_text = response.text.strip().strip('"\'')
+
+        # Sentiment filter: AI returns "SKIP" for negative/hostile posts
+        if reply_text.upper().startswith("SKIP"):
+            logger.info("[AI Reply] Post flagged as negative sentiment, skipping")
+            return "SKIP"
 
         if not reply_text or len(reply_text) < 5:
             return None
@@ -135,11 +194,10 @@ def should_reply_today(username: str) -> bool:
     return True
 
 
-def select_topic(page, bot_usernames: set) -> Optional[Dict]:
-    """Fetch recent topics and pick one suitable for replying.
+def _fetch_topic_candidates(page, bot_usernames: set) -> list:
+    """Fetch /latest.json once and return filtered candidate list.
 
-    Uses browser JS fetch to bypass Cloudflare.
-    Returns dict with 'id' and 'title', or None if no suitable topic found.
+    Returns list of dicts with 'id' and 'title', or empty list on failure.
     """
     try:
         result = page.run_js("""
@@ -149,36 +207,42 @@ def select_topic(page, bot_usernames: set) -> Optional[Dict]:
         """)
         if not result:
             logger.warning("[Reply] Failed to fetch /latest.json via browser")
-            return None
+            return []
 
         data = json.loads(result)
         topics = data.get("topic_list", {}).get("topics", [])
+
+        # Build user_id -> username map from top-level users array
+        users_list = data.get("users", [])
+        uid_to_username = {u["id"]: u["username"] for u in users_list if "id" in u and "username" in u}
     except Exception as e:
         logger.error(f"[Reply] Error fetching topics: {e}")
-        return None
+        return []
 
     now = datetime.now(timezone.utc)
     candidates = []
 
     for topic in topics:
+        topic_id = topic.get("id")
+
         # Skip pinned/banner topics
         if topic.get("pinned") or topic.get("pinned_globally"):
             continue
 
-        # Skip topics by bot accounts
+        # Skip topics by bot accounts — resolve user_id to username via map
         poster_username = ""
         posters = topic.get("posters", [])
-        if posters:
-            # The first poster with description containing "Original Poster" is the creator
-            for p in posters:
-                if "Original Poster" in (p.get("description", "") or ""):
-                    poster_username = str(p.get("user_id", ""))
-                    break
+        for p in posters:
+            if "Original Poster" in (p.get("description", "") or ""):
+                poster_username = uid_to_username.get(p.get("user_id"), "")
+                break
+        if poster_username in bot_usernames:
+            continue
+        # Also skip if last poster is a bot (prevents bot-to-bot chains)
+        if topic.get("last_poster_username", "") in bot_usernames:
+            continue
 
-        # Also check last_poster_username which is always available
-        creator = topic.get("last_poster_username", "")
-
-        # Skip if created within the last 3 days check via created_at
+        # Skip topics older than 3 days
         created_at = topic.get("created_at", "")
         if created_at:
             try:
@@ -197,27 +261,49 @@ def select_topic(page, bot_usernames: set) -> Optional[Dict]:
         if topic.get("closed") or topic.get("archived"):
             continue
 
-        topic_id = topic.get("id")
         title = topic.get("title", "")
         if topic_id:
             candidates.append({"id": topic_id, "title": title})
 
-    if not candidates:
+    return candidates
+
+
+def select_topic(page, bot_usernames: set, exclude_ids: set = None,
+                 _cached_candidates: list = None) -> Optional[Dict]:
+    """Pick a suitable topic for replying.
+
+    If _cached_candidates is provided, picks from that list (avoids re-fetching).
+    Otherwise fetches /latest.json via browser JS.
+    Returns dict with 'id' and 'title', or None if no suitable topic found.
+    """
+    if exclude_ids is None:
+        exclude_ids = set()
+
+    candidates = _cached_candidates if _cached_candidates is not None else \
+        _fetch_topic_candidates(page, bot_usernames)
+
+    # Filter out already-tried topics
+    filtered = [c for c in candidates if c["id"] not in exclude_ids]
+
+    if not filtered:
         logger.warning("[Reply] No suitable topics found")
         return None
 
     # Pick a random candidate
-    chosen = random.choice(candidates)
+    chosen = random.choice(filtered)
     logger.info(f"[Reply] Selected topic: [{chosen['id']}] {chosen['title']}")
     return chosen
 
 
-def _check_already_replied(page, topic_id: int, username: str) -> bool:
-    """Check if the current user already replied to this topic.
+def _check_topic_status(page, topic_id: int, username: str) -> dict:
+    """Check topic status: whether user already replied, plus extract first post content.
 
-    Uses the topic's participant list which covers all pages,
-    unlike post_stream.posts which only returns the first ~20 posts.
+    Returns dict with:
+        - already_replied: bool
+        - first_post_excerpt: str (first post content, stripped HTML, max 200 chars)
+        - category_id: int or None
     """
+    result_dict = {"already_replied": False, "first_post_excerpt": "", "category_id": None}
     try:
         result = page.run_js(f"""
             return fetch('/t/{topic_id}.json', {{
@@ -225,25 +311,42 @@ def _check_already_replied(page, topic_id: int, username: str) -> bool:
             }}).then(r => r.ok ? r.text() : '');
         """)
         if not result:
-            return False
+            return result_dict
 
         data = json.loads(result)
 
-        # Check participants list first — covers ALL posts regardless of pagination
+        # Extract category_id
+        result_dict["category_id"] = data.get("category_id")
+
+        # Extract first post content (raw or cooked, strip HTML, truncate)
+        post_stream = data.get("post_stream", {})
+        posts = post_stream.get("posts", [])
+        if posts:
+            first_post = posts[0]
+            # Prefer raw (markdown) over cooked (HTML)
+            content = first_post.get("raw", "") or first_post.get("cooked", "")
+            # Strip HTML tags if present
+            content = re.sub(r"<[^>]+>", "", content).strip()
+            # Truncate to 200 chars
+            if len(content) > 200:
+                content = content[:200] + "..."
+            result_dict["first_post_excerpt"] = content
+
+        # Check participants list — covers ALL posts regardless of pagination
         participants = data.get("details", {}).get("participants", [])
         for p in participants:
             if p.get("username", "").lower() == username.lower():
-                return True
+                result_dict["already_replied"] = True
+                return result_dict
 
         # Fallback: check first page of posts (in case participants is missing)
-        post_stream = data.get("post_stream", {})
-        posts = post_stream.get("posts", [])
         for post in posts:
             if post.get("username", "").lower() == username.lower():
-                return True
+                result_dict["already_replied"] = True
+                return result_dict
     except Exception:
         pass
-    return False
+    return result_dict
 
 
 def post_reply(page, topic_id: int, text: str, csrf_token: str) -> bool:
@@ -360,26 +463,57 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
         logger.warning(f"[Reply] {username}: no CSRF token available, skipping reply")
         return None
 
-    # Select a topic (uses browser JS fetch)
-    topic = select_topic(page, bot_usernames)
+    # Fetch topic candidates once, then pick from cached list in retry loop
+    cached_candidates = _fetch_topic_candidates(page, bot_usernames)
+
+    # Select a topic with retry loop (max 3 attempts)
+    tried_ids = set()
+    topic = None
+    topic_status = None
+    for attempt in range(3):
+        candidate = select_topic(
+            page, bot_usernames, exclude_ids=tried_ids,
+            _cached_candidates=cached_candidates
+        )
+        if not candidate:
+            break
+        tried_ids.add(candidate["id"])
+
+        # Anti-detection: skip if another account in this job already replied to this topic
+        if candidate["id"] in used_topics:
+            logger.info(f"[Reply] {username}: topic {candidate['id']} used by another account, retry {attempt+1}/3")
+            continue
+
+        # Check topic status (already replied + extract first post content)
+        status = _check_topic_status(page, candidate["id"], username)
+        if status["already_replied"]:
+            logger.info(f"[Reply] {username}: already replied to {candidate['id']}, retry {attempt+1}/3")
+            continue
+
+        topic = candidate
+        topic_status = status
+        break
+
     if not topic:
+        logger.info(f"[Reply] {username}: no suitable topic found after retries")
         return None
 
     topic_id = topic["id"]
     topic_title = topic["title"]
+    first_post_excerpt = topic_status.get("first_post_excerpt", "") if topic_status else ""
+    category_id = topic_status.get("category_id") if topic_status else None
+    category_name = CATEGORY_MAP.get(category_id, "") if category_id else ""
 
-    # Anti-detection: skip if another account in this job already replied to this topic
-    if topic_id in used_topics:
-        logger.info(f"[Reply] {username}: topic {topic_id} already used by another account in this job, skipping")
+    # Generate reply text: try Gemini AI first (with content + category context), fall back to REPLY_POOL
+    reply_text = generate_semantic_reply(
+        topic_title, content_excerpt=first_post_excerpt, category_name=category_name
+    )
+
+    # Sentiment filter: AI flagged this post as negative, skip entirely
+    if reply_text == "SKIP":
+        logger.info(f"[Reply] {username}: skipping topic {topic_id} (negative sentiment)")
         return None
 
-    # Check if we already replied to this topic (uses browser JS fetch)
-    if _check_already_replied(page, topic_id, username):
-        logger.info(f"[Reply] {username}: already replied to topic {topic_id}, skipping")
-        return None
-
-    # Generate reply text: try Gemini AI first, fall back to REPLY_POOL
-    reply_text = generate_semantic_reply(topic_title)
     is_ai = reply_text is not None
 
     if not reply_text:
@@ -391,6 +525,50 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
 
     source = "AI" if is_ai else "pool"
     logger.info(f"[Reply] {username}: replying to topic {topic_id} ({source}): {reply_text}")
+
+    # C4: Navigate to topic page and simulate reading before posting
+    try:
+        logger.info(f"[Reply] {username}: navigating to topic {topic_id} for read simulation")
+        page.get(f"https://linux.do/t/{topic_id}")
+        time.sleep(random.uniform(2, 5))
+        for _ in range(random.randint(2, 4)):
+            page.run_js(f"window.scrollBy({{top: {random.randint(200, 600)}, behavior: 'smooth'}})")
+            time.sleep(random.uniform(1.5, 4))
+        page.run_js("window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'})")
+        time.sleep(random.uniform(1, 2))
+
+        # "Like what you reply to" — 80% chance to like OP before replying
+        if random.random() < 0.80:
+            try:
+                liked = page.run_js("""
+                    // Scroll back to top to find OP's like button
+                    window.scrollTo({top: 0, behavior: 'smooth'});
+                    // Wait a moment for scroll
+                    return new Promise(resolve => setTimeout(() => {
+                        const firstPost = document.querySelector('article#post_1')
+                                       || document.querySelector('.topic-post:first-child');
+                        if (!firstPost) { resolve('no_post'); return; }
+                        const btn = firstPost.querySelector('.discourse-reactions-reaction-button')
+                                 || firstPost.querySelector('button.toggle-like')
+                                 || firstPost.querySelector('.like-button');
+                        if (!btn) { resolve('no_btn'); return; }
+                        if (btn.classList.contains('has-like') || btn.classList.contains('liked'))
+                            { resolve('already_liked'); return; }
+                        btn.click();
+                        resolve('liked');
+                    }, 800));
+                """)
+                if liked == 'liked':
+                    logger.info(f"[Reply] {username}: liked OP in topic {topic_id}")
+                    time.sleep(random.uniform(0.8, 2.0))
+                elif liked == 'already_liked':
+                    logger.info(f"[Reply] {username}: OP already liked in topic {topic_id}")
+                else:
+                    logger.info(f"[Reply] {username}: couldn't like OP ({liked})")
+            except Exception as e:
+                logger.warning(f"[Reply] {username}: like-on-reply failed (non-fatal): {e}")
+    except Exception as e:
+        logger.warning(f"[Reply] {username}: read simulation failed (non-fatal): {e}")
 
     success = post_reply(page, topic_id, reply_text, csrf_token)
 
