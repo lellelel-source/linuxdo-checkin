@@ -10,6 +10,7 @@ import json
 import hashlib
 import functools
 import threading
+import subprocess
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from loguru import logger
@@ -113,6 +114,28 @@ HOME_URL = "https://linux.do/"
 LOGIN_URL = "https://linux.do/login"
 SESSION_URL = "https://linux.do/session"
 CSRF_URL = "https://linux.do/session/csrf"
+
+
+def _cleanup_chrome_processes():
+    """Kill orphaned chrome/chromium processes to prevent memory buildup.
+
+    Safe to call on Linux (GitHub Actions) — uses pkill which only targets
+    processes owned by the current user.
+    """
+    try:
+        from sys import platform
+        if platform.startswith("linux"):
+            # Kill zombie chrome processes; ignore errors if none found
+            subprocess.run(
+                ["pkill", "-f", "chrome.*--headless"],
+                timeout=5, capture_output=True
+            )
+            subprocess.run(
+                ["pkill", "-f", "chromium.*--headless"],
+                timeout=5, capture_output=True
+            )
+    except Exception:
+        pass  # non-critical — best effort cleanup
 
 
 class LinuxDoBrowser:
@@ -412,7 +435,10 @@ class LinuxDoBrowser:
             if i == like_at_scroll:
                 self.click_like(page)
 
-            if random.random() < 0.05:
+            # Progressive exit probability: starts at 5%, increases each scroll
+            # By scroll 10 it's ~30%, preventing timeout on long posts
+            exit_prob = 0.05 + (i / max_scrolls) * 0.25
+            if random.random() < exit_prob:
                 logger.success("随机退出浏览")
                 break
 
@@ -497,6 +523,8 @@ class LinuxDoBrowser:
                 self.browser.quit()
             except Exception:
                 pass
+            # Kill any orphaned chrome processes left by this instance
+            _cleanup_chrome_processes()
 
     def visit_side_page(self):
         """Occasionally visit notifications, profile, or categories like a real user."""
@@ -524,62 +552,93 @@ class LinuxDoBrowser:
 
     def click_like(self, page):
         try:
-            # Re-query the element fresh each time to avoid stale references
-            # after dynamic page updates from scrolling
-            like_button = page.ele(".discourse-reactions-reaction-button", timeout=3)
-            if like_button:
-                logger.info("找到未点赞的帖子，准备点赞")
-                # Scroll the button into view first to avoid stale element issues
-                page.run_js("document.querySelector('.discourse-reactions-reaction-button')?.scrollIntoView({behavior:'smooth',block:'center'})")
-                self._wait(0.5, 1.0)
-                # Re-query after scroll to get fresh reference
-                like_button = page.ele(".discourse-reactions-reaction-button", timeout=3)
-                if like_button:
-                    like_button.hover()
-                    self._wait(0.5, 1.5)
-                    like_button.click()
-                    logger.info("点赞成功")
-                    self._wait(0.8, 2.5)
-                else:
-                    logger.info("点赞按钮刷新后消失")
+            # Use pure JS to find and click the like button — avoids stale element issues
+            # from Discourse's Ember.js re-rendering during scroll
+            result = page.run_js("""
+                // Try reaction button first, then standard like button
+                const btn = document.querySelector('.discourse-reactions-reaction-button')
+                           || document.querySelector('button.toggle-like')
+                           || document.querySelector('.like-button');
+                if (!btn) return 'not_found';
+                // Check if already liked (has .has-like or .liked class)
+                if (btn.classList.contains('has-like') || btn.classList.contains('liked')) return 'already_liked';
+                btn.scrollIntoView({behavior: 'smooth', block: 'center'});
+                return 'found';
+            """)
+
+            if result == 'not_found':
+                logger.info("未找到点赞按钮")
+                return
+            if result == 'already_liked':
+                logger.info("帖子已经点过赞了")
+                return
+
+            logger.info("找到未点赞的帖子，准备点赞")
+            self._wait(0.5, 1.5)
+
+            # Click via JS — immune to stale element references
+            clicked = page.run_js("""
+                const btn = document.querySelector('.discourse-reactions-reaction-button')
+                           || document.querySelector('button.toggle-like')
+                           || document.querySelector('.like-button');
+                if (btn) { btn.click(); return true; }
+                return false;
+            """)
+            if clicked:
+                logger.info("点赞成功")
+                self._wait(0.8, 2.5)
             else:
-                logger.info("帖子可能已经点过赞了")
+                logger.info("点赞按钮刷新后消失")
         except Exception as e:
             logger.error(f"点赞失败: {str(e)}")
 
     def click_bookmark(self, page):
         """Bookmark the first post in the topic, like a user saving it for later."""
         try:
-            # Discourse bookmark button: .bookmark on the first post,
-            # or the topic-level bookmark in footer buttons
-            bookmark_btn = page.ele(".topic-footer-main-buttons .bookmark", timeout=3)
-            if not bookmark_btn:
-                bookmark_btn = page.ele("button.bookmark", timeout=2)
-            if not bookmark_btn:
+            # Use JS to find and click bookmark — avoids stale element issues
+            result = page.run_js("""
+                const btn = document.querySelector('.topic-footer-main-buttons .bookmark')
+                         || document.querySelector('button.bookmark')
+                         || document.querySelector('.bookmark-btn');
+                if (!btn) return 'not_found';
+                // Check if already bookmarked
+                if (btn.classList.contains('bookmarked')) return 'already_bookmarked';
+                btn.scrollIntoView({behavior: 'smooth', block: 'center'});
+                return 'found';
+            """)
+
+            if result == 'not_found':
                 logger.info("未找到书签按钮，跳过收藏")
                 return
+            if result == 'already_bookmarked':
+                logger.info("帖子已经收藏过了")
+                return
 
-            # Scroll the button into view first — real users scroll to the bottom area
-            page.run_js("document.querySelector('.topic-footer-main-buttons')?.scrollIntoView({behavior:'smooth',block:'center'})")
             self._wait(0.8, 2.0)
 
-            bookmark_btn.hover()
-            self._wait(0.4, 1.2)
-            bookmark_btn.click()
+            # Click via JS
+            page.run_js("""
+                const btn = document.querySelector('.topic-footer-main-buttons .bookmark')
+                         || document.querySelector('button.bookmark')
+                         || document.querySelector('.bookmark-btn');
+                if (btn) btn.click();
+            """)
             logger.info("收藏帖子成功")
-
-            # Sometimes the bookmark menu pops up — just wait and dismiss
             self._wait(1.0, 2.5)
 
             # If a bookmark popup/modal appeared, click the save/confirm button
             try:
-                save_btn = page.ele("button.btn-primary.bookmark-save", timeout=2)
-                if save_btn:
-                    save_btn.click()
+                save_clicked = page.run_js("""
+                    const btn = document.querySelector('button.btn-primary.bookmark-save')
+                             || document.querySelector('.bookmark-reminder-modal .btn-primary');
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                """)
+                if save_clicked:
                     logger.info("确认收藏成功")
                     self._wait(0.5, 1.5)
             except Exception:
-                pass  # No popup — bookmark was toggled directly
+                pass
         except Exception as e:
             logger.error(f"收藏失败: {str(e)}")
 
@@ -633,26 +692,44 @@ class LinuxDoBrowser:
 
     def print_connect_info(self):
         logger.info("获取连接信息")
-        headers = {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        }
-        resp = self.session.get(
-            "https://connect.linux.do/", headers=headers, impersonate=self._impersonate
-        )
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.select("table tr")
-        info = []
+        try:
+            # Use browser to visit connect.linux.do (curl_cffi gets Cloudflare 403)
+            connect_tab = self.browser.new_tab()
+            try:
+                connect_tab.get("https://connect.linux.do/")
+                time.sleep(random.uniform(2, 4))
 
-        for row in rows:
-            cells = row.select("td")
-            if len(cells) >= 3:
-                project = cells[0].text.strip()
-                current = cells[1].text.strip() if cells[1].text.strip() else "0"
-                requirement = cells[2].text.strip() if cells[2].text.strip() else "0"
-                info.append([project, current, requirement])
+                # Extract table data via JS to avoid BeautifulSoup dependency on curl_cffi
+                info = connect_tab.run_js("""
+                    const rows = document.querySelectorAll('table tr');
+                    const data = [];
+                    rows.forEach(row => {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 3) {
+                            data.push([
+                                cells[0].textContent.trim(),
+                                cells[1].textContent.trim() || '0',
+                                cells[2].textContent.trim() || '0'
+                            ]);
+                        }
+                    });
+                    return JSON.stringify(data);
+                """)
 
-        print("--------------Connect Info-----------------")
-        print(tabulate(info, headers=["项目", "当前", "要求"], tablefmt="pretty"))
+                if info:
+                    table_data = json.loads(info)
+                    print("--------------Connect Info-----------------")
+                    print(tabulate(table_data, headers=["项目", "当前", "要求"], tablefmt="pretty"))
+                else:
+                    print("--------------Connect Info-----------------")
+                    print("(no data)")
+            finally:
+                try:
+                    connect_tab.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"获取连接信息失败: {e}")
 
     def send_notifications(self, browse_enabled):
         """发送签到通知"""

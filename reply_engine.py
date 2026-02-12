@@ -174,7 +174,11 @@ def select_topic(page, bot_usernames: set) -> Optional[Dict]:
 
 
 def _check_already_replied(page, topic_id: int, username: str) -> bool:
-    """Check if the current user already replied to this topic."""
+    """Check if the current user already replied to this topic.
+
+    Uses the topic's participant list which covers all pages,
+    unlike post_stream.posts which only returns the first ~20 posts.
+    """
     try:
         result = page.run_js(f"""
             return fetch('/t/{topic_id}.json', {{
@@ -185,6 +189,14 @@ def _check_already_replied(page, topic_id: int, username: str) -> bool:
             return False
 
         data = json.loads(result)
+
+        # Check participants list first — covers ALL posts regardless of pagination
+        participants = data.get("details", {}).get("participants", [])
+        for p in participants:
+            if p.get("username", "").lower() == username.lower():
+                return True
+
+        # Fallback: check first page of posts (in case participants is missing)
         post_stream = data.get("post_stream", {})
         posts = post_stream.get("posts", [])
         for post in posts:
@@ -276,12 +288,38 @@ def execute_reply(browser, bot_usernames: set = None, used_topics: set = None,
     if not should_reply_today(username):
         return None
 
-    csrf_token = getattr(browser, "_csrf_token", None)
+    page = browser.page
+
+    # Ensure page is on linux.do before relative JS fetch calls
+    try:
+        current_url = page.url or ""
+        if "linux.do" not in current_url:
+            logger.info(f"[Reply] {username}: navigating back to linux.do (was on {current_url})")
+            page.get("https://linux.do/")
+            time.sleep(random.uniform(2, 4))
+    except Exception as e:
+        logger.warning(f"[Reply] {username}: domain check failed: {e}")
+
+    # Refresh CSRF token — the one from login may be stale after a long browse session
+    csrf_token = None
+    try:
+        fresh_csrf = page.run_js("""
+            return fetch('/session/csrf', {
+                headers: {'X-Requested-With': 'XMLHttpRequest'}
+            }).then(r => r.json()).then(d => d.csrf);
+        """)
+        if fresh_csrf:
+            csrf_token = fresh_csrf
+            browser._csrf_token = fresh_csrf
+            logger.info(f"[Reply] {username}: refreshed CSRF token: {fresh_csrf[:10]}...")
+    except Exception as e:
+        logger.warning(f"[Reply] {username}: CSRF refresh failed: {e}")
+
+    if not csrf_token:
+        csrf_token = getattr(browser, "_csrf_token", None)
     if not csrf_token:
         logger.warning(f"[Reply] {username}: no CSRF token available, skipping reply")
         return None
-
-    page = browser.page
 
     # Select a topic (uses browser JS fetch)
     topic = select_topic(page, bot_usernames)
