@@ -21,7 +21,12 @@ from bs4 import BeautifulSoup
 from notify import NotificationManager
 
 
-def retry_decorator(retries=3, min_delay=5, max_delay=10):
+def retry_decorator(retries=3, base_delay=3, backoff_factor=2, max_delay=30):
+    """Retry with exponential backoff + jitter.
+
+    Delay sequence example (base=3, factor=2): 3s, 6s, 12s (capped at max_delay).
+    Jitter of +/-25% prevents thundering-herd when multiple instances retry.
+    """
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -29,16 +34,16 @@ def retry_decorator(retries=3, min_delay=5, max_delay=10):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    if attempt == retries - 1:  # 最后一次尝试
+                    if attempt == retries - 1:
                         logger.error(f"函数 {func.__name__} 最终执行失败: {str(e)}")
                     logger.warning(
                         f"函数 {func.__name__} 第 {attempt + 1}/{retries} 次尝试失败: {str(e)}"
                     )
                     if attempt < retries - 1:
-                        sleep_s = random.uniform(min_delay, max_delay)
-                        logger.info(
-                            f"将在 {sleep_s:.2f}s 后重试 ({min_delay}-{max_delay}s 随机延迟)"
-                        )
+                        delay = min(base_delay * (backoff_factor ** attempt), max_delay)
+                        jitter = delay * random.uniform(-0.25, 0.25)
+                        sleep_s = delay + jitter
+                        logger.info(f"将在 {sleep_s:.2f}s 后重试 (exponential backoff)")
                         time.sleep(sleep_s)
             return None
 
@@ -116,6 +121,23 @@ SESSION_URL = "https://linux.do/session"
 CSRF_URL = "https://linux.do/session/csrf"
 
 
+def _get_memory_percent() -> float:
+    """Return memory usage percentage on Linux via /proc/meminfo (no psutil needed)."""
+    try:
+        with open("/proc/meminfo", "r") as f:
+            lines = f.readlines()
+        mem_info = {}
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2:
+                mem_info[parts[0].rstrip(":")] = int(parts[1])
+        total = mem_info.get("MemTotal", 1)
+        available = mem_info.get("MemAvailable", total)
+        return (1 - available / total) * 100
+    except Exception:
+        return 0.0  # can't read — assume OK
+
+
 def _cleanup_chrome_processes():
     """Kill orphaned chrome/chromium processes to prevent memory buildup.
 
@@ -125,7 +147,6 @@ def _cleanup_chrome_processes():
     try:
         from sys import platform
         if platform.startswith("linux"):
-            # Kill zombie chrome processes; ignore errors if none found
             subprocess.run(
                 ["pkill", "-f", "chrome.*--headless"],
                 timeout=5, capture_output=True
@@ -138,10 +159,31 @@ def _cleanup_chrome_processes():
         pass  # non-critical — best effort cleanup
 
 
+def _check_memory_and_cleanup():
+    """Circuit-breaker: force Chrome cleanup if memory usage exceeds 90%.
+
+    GitHub Actions runners have ~7GB RAM. Multiple headless Chrome instances
+    can easily exhaust this, causing OOM kills that cascade to all remaining accounts.
+    """
+    from sys import platform
+    if not platform.startswith("linux"):
+        return
+    mem_pct = _get_memory_percent()
+    if mem_pct > 90:
+        logger.warning(f"Memory critical: {mem_pct:.1f}% used, forcing Chrome cleanup")
+        _cleanup_chrome_processes()
+        time.sleep(2)  # let OS reclaim memory
+    elif mem_pct > 75:
+        logger.info(f"Memory usage: {mem_pct:.1f}%")
+
+
 class LinuxDoBrowser:
     def __init__(self, username: str, password: str) -> None:
         self.username = username
         self.password = password
+        # Short trace ID for log correlation across parallel jobs
+        self.trace_id = hashlib.md5(username.encode()).hexdigest()[:6]
+        self.log = self.log.bind(user=username, tid=self.trace_id)
         from sys import platform
 
         if platform == "linux" or platform == "linux2":
@@ -217,26 +259,26 @@ class LinuxDoBrowser:
         return t
 
     def login(self):
-        logger.info("开始登录")
+        self.log.info("开始登录")
 
         # Step 1: Navigate to login page in browser (passes Cloudflare automatically)
-        logger.info("通过浏览器访问登录页面...")
+        self.log.info("通过浏览器访问登录页面...")
         try:
             self.page.get(LOGIN_URL)
             time.sleep(random.uniform(2, 4))
         except Exception as e:
-            logger.error(f"无法访问登录页面: {e}")
+            self.log.error(f"无法访问登录页面: {e}")
             return False
 
         # Step 2: Fill in login form
-        logger.info("填写登录表单...")
+        self.log.info("填写登录表单...")
         try:
             # Find and fill username field
             username_input = self.page.ele("#login-account-name", timeout=10)
             if not username_input:
                 username_input = self.page.ele("@name=login", timeout=5)
             if not username_input:
-                logger.error("未找到用户名输入框")
+                self.log.error("未找到用户名输入框")
                 return False
 
             username_input.clear()
@@ -248,50 +290,50 @@ class LinuxDoBrowser:
             if not password_input:
                 password_input = self.page.ele("@name=password", timeout=5)
             if not password_input:
-                logger.error("未找到密码输入框")
+                self.log.error("未找到密码输入框")
                 return False
 
             password_input.clear()
             password_input.input(self.password)
             self._wait(0.5, 1.0)
         except Exception as e:
-            logger.error(f"填写表单失败: {e}")
+            self.log.error(f"填写表单失败: {e}")
             return False
 
         # Step 3: Click login button
-        logger.info("点击登录按钮...")
+        self.log.info("点击登录按钮...")
         try:
             login_btn = self.page.ele("#login-button", timeout=5)
             if not login_btn:
                 login_btn = self.page.ele("@type=submit", timeout=3)
             if not login_btn:
-                logger.error("未找到登录按钮")
+                self.log.error("未找到登录按钮")
                 return False
 
             login_btn.click()
             time.sleep(random.uniform(3, 6))
         except Exception as e:
-            logger.error(f"点击登录按钮失败: {e}")
+            self.log.error(f"点击登录按钮失败: {e}")
             return False
 
         # Check for rate limiting or error messages in the page
         try:
             page_text = self.page.html or ""
             if "rate limit" in page_text.lower() or "too many" in page_text.lower():
-                logger.warning("触发速率限制")
+                self.log.warning("触发速率限制")
                 self._rate_limit_wait = 60
                 return "rate_limited"
         except Exception:
             pass
 
         # Step 4: Verify login
-        logger.info("验证登录状态...")
+        self.log.info("验证登录状态...")
         for attempt in range(3):
             time.sleep(random.uniform(3, 7))
             try:
                 user_ele = self.page.ele("@id=current-user")
                 if user_ele:
-                    logger.info("登录验证成功")
+                    self.log.info("登录验证成功")
                     break
             except Exception:
                 pass
@@ -299,20 +341,20 @@ class LinuxDoBrowser:
             # Fallback check for avatar
             try:
                 if "avatar" in self.page.html:
-                    logger.info("登录验证成功 (通过 avatar)")
+                    self.log.info("登录验证成功 (通过 avatar)")
                     break
             except Exception:
                 pass
 
             if attempt < 2:
-                logger.warning(f"登录验证失败，第 {attempt + 1}/3 次尝试，刷新页面重试...")
+                self.log.warning(f"登录验证失败，第 {attempt + 1}/3 次尝试，刷新页面重试...")
                 self.page.get(HOME_URL)
             else:
-                logger.error("登录验证失败 (3次尝试后仍未找到 current-user)")
+                self.log.error("登录验证失败 (3次尝试后仍未找到 current-user)")
                 return False
 
         # Step 5: Get CSRF token via browser JS (stays in browser context, no Cloudflare issue)
-        logger.info("通过浏览器获取 CSRF token...")
+        self.log.info("通过浏览器获取 CSRF token...")
         try:
             csrf_token = self.page.run_js("""
                 return fetch('/session/csrf', {
@@ -321,14 +363,14 @@ class LinuxDoBrowser:
             """)
             if csrf_token:
                 self._csrf_token = csrf_token
-                logger.info(f"CSRF Token obtained: {csrf_token[:10]}...")
+                self.log.info(f"CSRF Token obtained: {csrf_token[:10]}...")
             else:
-                logger.warning("未能获取 CSRF token (reply 功能将不可用)")
+                self.log.warning("未能获取 CSRF token (reply 功能将不可用)")
         except Exception as e:
-            logger.warning(f"获取 CSRF token 失败: {e}")
+            self.log.warning(f"获取 CSRF token 失败: {e}")
 
         # Step 6: Sync browser cookies to curl_cffi session (for reply API calls)
-        logger.info("同步 Cookie 到 API session...")
+        self.log.info("同步 Cookie 到 API session...")
         try:
             browser_cookies = self.page.cookies()
             for cookie in browser_cookies:
@@ -337,9 +379,9 @@ class LinuxDoBrowser:
                     cookie.get("value", ""),
                     domain=cookie.get("domain", ".linux.do"),
                 )
-            logger.info(f"已同步 {len(browser_cookies)} 个 Cookie")
+            self.log.info(f"已同步 {len(browser_cookies)} 个 Cookie")
         except Exception as e:
-            logger.warning(f"Cookie 同步失败: {e}")
+            self.log.warning(f"Cookie 同步失败: {e}")
 
         self.print_connect_info()
 
@@ -351,7 +393,7 @@ class LinuxDoBrowser:
 
     def browse_homepage(self):
         """Scroll the homepage a bit before clicking topics, like a real user."""
-        logger.info("浏览首页...")
+        self.log.info("浏览首页...")
         self._wait(2, 5)
         for _ in range(random.randint(1, 3)):
             scroll = random.randint(300, 700)
@@ -363,16 +405,16 @@ class LinuxDoBrowser:
     def click_topic(self):
         topic_list = self.page.ele("@id=list-area").eles(".:title")
         if not topic_list:
-            logger.error("未找到主题帖")
+            self.log.error("未找到主题帖")
             return False
         browse_count = random.randint(3, 8)
         browse_count = min(browse_count, len(topic_list))
-        logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择{browse_count}个")
+        self.log.info(f"发现 {len(topic_list)} 个主题帖，随机选择{browse_count}个")
         for i, topic in enumerate(random.sample(topic_list, browse_count)):
             self.click_one_topic(topic.attr("href"))
             if i < browse_count - 1:
                 gap = self._wait(3, 10)
-                logger.info(f"浏览下一个帖子前等待 {gap:.1f}s...")
+                self.log.info(f"浏览下一个帖子前等待 {gap:.1f}s...")
         return True
 
     @retry_decorator()
@@ -383,7 +425,7 @@ class LinuxDoBrowser:
 
             # ~10% chance to bail out quickly ("not what I expected")
             if random.random() < 0.10:
-                logger.info("快速浏览后离开帖子 (不感兴趣)")
+                self.log.info("快速浏览后离开帖子 (不感兴趣)")
                 self._wait(1, 3)
                 return
 
@@ -416,7 +458,7 @@ class LinuxDoBrowser:
         like_at_scroll = random.randint(2, max_scrolls - 1) if like_during else -1
 
         initial_pause = self._wait(2, 6)
-        logger.info(f"阅读帖子顶部，等待 {initial_pause:.1f}s...")
+        self.log.info(f"阅读帖子顶部，等待 {initial_pause:.1f}s...")
 
         for i in range(max_scrolls):
             if random.random() < 0.15:
@@ -427,10 +469,10 @@ class LinuxDoBrowser:
                 scroll_distance = random.randint(300, 800)
 
             direction = "上" if scroll_distance < 0 else "下"
-            logger.info(f"向{direction}滚动 {abs(scroll_distance)} 像素...")
+            self.log.info(f"向{direction}滚动 {abs(scroll_distance)} 像素...")
             page.run_js(f"window.scrollBy({{top: {scroll_distance}, behavior: 'smooth'}})")
             time.sleep(random.uniform(0.3, 0.8))
-            logger.info(f"已加载页面: {page.url}")
+            self.log.info(f"已加载页面: {page.url}")
 
             if i == like_at_scroll:
                 self.click_like(page)
@@ -439,7 +481,7 @@ class LinuxDoBrowser:
             # By scroll 10 it's ~30%, preventing timeout on long posts
             exit_prob = 0.05 + (i / max_scrolls) * 0.25
             if random.random() < exit_prob:
-                logger.success("随机退出浏览")
+                self.log.success("随机退出浏览")
                 break
 
             at_bottom = page.run_js(
@@ -449,7 +491,7 @@ class LinuxDoBrowser:
             if current_url != prev_url:
                 prev_url = current_url
             elif at_bottom and prev_url == current_url:
-                logger.success("已到达页面底部，退出浏览")
+                self.log.success("已到达页面底部，退出浏览")
                 break
 
             # Personality-adjusted wait times
@@ -459,7 +501,7 @@ class LinuxDoBrowser:
                 wait_time = self._wait(1, 2)
             else:
                 wait_time = self._wait(2, 5)
-            logger.info(f"等待 {wait_time:.2f} 秒...")
+            self.log.info(f"等待 {wait_time:.2f} 秒...")
 
     def run(self):
         self.reply_result = None  # Track reply result (dict or None)
@@ -469,7 +511,7 @@ class LinuxDoBrowser:
             if login_res == "rate_limited":
                 raise Exception(f"RATE_LIMITED:{getattr(self, '_rate_limit_wait', 60)}")
             if not login_res:
-                logger.warning("登录验证失败，跳过浏览")
+                self.log.warning("登录验证失败，跳过浏览")
                 return
 
             self.login_success = True
@@ -477,7 +519,7 @@ class LinuxDoBrowser:
             if BROWSE_ENABLED:
                 # Some users just login and leave (~15% chance)
                 if random.random() < 0.15:
-                    logger.info("模拟快速登录用户，跳过浏览")
+                    self.log.info("模拟快速登录用户，跳过浏览")
                 else:
                     # Occasionally check notifications or profile first (~20%)
                     if random.random() < 0.20:
@@ -487,9 +529,9 @@ class LinuxDoBrowser:
                     self.browse_homepage()
                     click_topic_res = self.click_topic()
                     if not click_topic_res:
-                        logger.error("点击主题失败，程序终止")
+                        self.log.error("点击主题失败，程序终止")
                         return
-                    logger.info("完成浏览任务")
+                    self.log.info("完成浏览任务")
 
                     # Read from bookmarks on scheduled days (1-3 days/week)
                     if should_read_bookmarks_today(self.username):
@@ -512,7 +554,7 @@ class LinuxDoBrowser:
                         used_phrases=getattr(self, "_used_phrases", set()),
                     )
                 except Exception as e:
-                    logger.error(f"[Reply] Reply phase failed: {e}")
+                    self.log.error(f"[Reply] Reply phase failed: {e}")
                     self.reply_result = None
         finally:
             try:
@@ -535,7 +577,7 @@ class LinuxDoBrowser:
             ("https://linux.do/top", "热门帖子"),
         ]
         url, name = random.choice(side_pages)
-        logger.info(f"访问{name}: {url}")
+        self.log.info(f"访问{name}: {url}")
         try:
             self.page.get(url)
             self._wait(3, 8)
@@ -548,7 +590,7 @@ class LinuxDoBrowser:
             self.page.get(HOME_URL)
             self._wait(2, 4)
         except Exception as e:
-            logger.warning(f"访问{name}失败: {e}")
+            self.log.warning(f"访问{name}失败: {e}")
 
     def click_like(self, page):
         try:
@@ -567,13 +609,13 @@ class LinuxDoBrowser:
             """)
 
             if result == 'not_found':
-                logger.info("未找到点赞按钮")
+                self.log.info("未找到点赞按钮")
                 return
             if result == 'already_liked':
-                logger.info("帖子已经点过赞了")
+                self.log.info("帖子已经点过赞了")
                 return
 
-            logger.info("找到未点赞的帖子，准备点赞")
+            self.log.info("找到未点赞的帖子，准备点赞")
             self._wait(0.5, 1.5)
 
             # Click via JS — immune to stale element references
@@ -585,12 +627,12 @@ class LinuxDoBrowser:
                 return false;
             """)
             if clicked:
-                logger.info("点赞成功")
+                self.log.info("点赞成功")
                 self._wait(0.8, 2.5)
             else:
-                logger.info("点赞按钮刷新后消失")
+                self.log.info("点赞按钮刷新后消失")
         except Exception as e:
-            logger.error(f"点赞失败: {str(e)}")
+            self.log.error(f"点赞失败: {str(e)}")
 
     def click_bookmark(self, page):
         """Bookmark the first post in the topic, like a user saving it for later."""
@@ -608,10 +650,10 @@ class LinuxDoBrowser:
             """)
 
             if result == 'not_found':
-                logger.info("未找到书签按钮，跳过收藏")
+                self.log.info("未找到书签按钮，跳过收藏")
                 return
             if result == 'already_bookmarked':
-                logger.info("帖子已经收藏过了")
+                self.log.info("帖子已经收藏过了")
                 return
 
             self._wait(0.8, 2.0)
@@ -623,7 +665,7 @@ class LinuxDoBrowser:
                          || document.querySelector('.bookmark-btn');
                 if (btn) btn.click();
             """)
-            logger.info("收藏帖子成功")
+            self.log.info("收藏帖子成功")
             self._wait(1.0, 2.5)
 
             # If a bookmark popup/modal appeared, click the save/confirm button
@@ -635,16 +677,16 @@ class LinuxDoBrowser:
                     return false;
                 """)
                 if save_clicked:
-                    logger.info("确认收藏成功")
+                    self.log.info("确认收藏成功")
                     self._wait(0.5, 1.5)
             except Exception:
                 pass
         except Exception as e:
-            logger.error(f"收藏失败: {str(e)}")
+            self.log.error(f"收藏失败: {str(e)}")
 
     def read_from_bookmarks(self):
         """Visit the bookmarks page and read one bookmarked topic, like revisiting saved content."""
-        logger.info("[Bookmark] 访问书签列表...")
+        self.log.info("[Bookmark] 访问书签列表...")
         try:
             self.page.get("https://linux.do/bookmarks")
             self._wait(2, 5)
@@ -661,7 +703,7 @@ class LinuxDoBrowser:
                              self.page.eles("css:a.title")
 
             if not bookmark_links:
-                logger.info("[Bookmark] 书签列表为空或未找到帖子链接")
+                self.log.info("[Bookmark] 书签列表为空或未找到帖子链接")
                 self.page.get(HOME_URL)
                 self._wait(1, 3)
                 return
@@ -670,7 +712,7 @@ class LinuxDoBrowser:
             target = random.choice(bookmark_links)
             topic_url = target.attr("href")
             topic_title = target.text.strip()
-            logger.info(f"[Bookmark] 从书签中选择帖子: {topic_title}")
+            self.log.info(f"[Bookmark] 从书签中选择帖子: {topic_title}")
 
             # Pause before clicking — scanning the list, deciding which to re-read
             self._wait(1, 3)
@@ -678,20 +720,20 @@ class LinuxDoBrowser:
             # Open and browse the bookmarked topic in a new tab, reusing existing browse logic
             self.click_one_topic(topic_url)
 
-            logger.info("[Bookmark] 书签帖子阅读完成")
+            self.log.info("[Bookmark] 书签帖子阅读完成")
 
             # Return to homepage
             self.page.get(HOME_URL)
             self._wait(1, 3)
         except Exception as e:
-            logger.warning(f"[Bookmark] 阅读书签帖子失败: {e}")
+            self.log.warning(f"[Bookmark] 阅读书签帖子失败: {e}")
             try:
                 self.page.get(HOME_URL)
             except Exception:
                 pass
 
     def print_connect_info(self):
-        logger.info("获取连接信息")
+        self.log.info("获取连接信息")
         try:
             # Use browser to visit connect.linux.do (curl_cffi gets Cloudflare 403)
             connect_tab = self.browser.new_tab()
@@ -729,7 +771,7 @@ class LinuxDoBrowser:
                 except Exception:
                     pass
         except Exception as e:
-            logger.warning(f"获取连接信息失败: {e}")
+            self.log.warning(f"获取连接信息失败: {e}")
 
     def send_notifications(self, browse_enabled):
         """发送签到通知"""
@@ -788,6 +830,13 @@ def process_account(account, index, total):
 
 
 if __name__ == "__main__":
+    import sys
+    # Configure loguru to include trace_id when available (bound via logger.bind)
+    logger.configure(extra={"user": "", "tid": ""})
+    fmt = "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[tid]}</cyan> | {message}"
+    logger.remove()
+    logger.add(sys.stderr, format=fmt, colorize=True)
+
     all_accounts = get_accounts()
     if not all_accounts:
         print("No accounts configured. Set ACCOUNTS_JSON or LINUXDO_USERNAME/PASSWORD.")
@@ -838,6 +887,7 @@ if __name__ == "__main__":
             continue
 
         logger.info(f"========== [{i}/{total}] Processing: {username} ==========")
+        _check_memory_and_cleanup()  # circuit-breaker: cleanup if memory > 90%
         try:
             browser = LinuxDoBrowser(username, password)
             browser._bot_usernames = bot_usernames
