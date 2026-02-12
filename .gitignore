@@ -1,1 +1,3 @@
 accounts.json
+.cookie_cache/
+__pycache__/

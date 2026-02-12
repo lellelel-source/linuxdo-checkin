@@ -183,7 +183,7 @@ class LinuxDoBrowser:
         self.password = password
         # Short trace ID for log correlation across parallel jobs
         self.trace_id = hashlib.md5(username.encode()).hexdigest()[:6]
-        self.log = self.log.bind(user=username, tid=self.trace_id)
+        self.log = logger.bind(user=username, tid=self.trace_id)
         from sys import platform
 
         if platform == "linux" or platform == "linux2":
@@ -195,17 +195,19 @@ class LinuxDoBrowser:
         else:
             platformIdentifier = "X11; Linux x86_64"
 
-        # Randomize Chrome version and viewport per account
-        chrome_ver = random.choice(CHROME_VERSIONS)
-        viewport = random.choice(VIEWPORTS)
+        # Deterministic fingerprint per account — same account always gets the same
+        # browser profile across runs, but different accounts look different.
+        # Uses username as seed so fingerprint is stable and consistent.
+        fp_seed = int(hashlib.md5(f"fingerprint:{username}".encode()).hexdigest(), 16)
+        fp_rng = random.Random(fp_seed)
+
+        chrome_ver = fp_rng.choice(CHROME_VERSIONS)
+        viewport = fp_rng.choice(VIEWPORTS)
         ua = f"Mozilla/5.0 ({platformIdentifier}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36"
 
-        # Pick a consistent impersonation for this session
-        # Use well-supported targets: "chrome" alias auto-resolves to latest available
-        self._impersonate = random.choice(["chrome", "chrome124", "chrome131"])
+        self._impersonate = fp_rng.choice(["chrome", "chrome124", "chrome131"])
 
-        # Randomize Accept-Language per account
-        accept_lang = random.choice([
+        accept_lang = fp_rng.choice([
             "zh-CN,zh;q=0.9",
             "zh-CN,zh;q=0.9,en;q=0.8",
             "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -213,9 +215,8 @@ class LinuxDoBrowser:
             "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
         ])
 
-        # User "personality" — consistent browsing speed within a session
-        # speed_factor < 1 = fast reader, > 1 = slow reader
-        self._speed = random.uniform(0.6, 1.6)
+        # User "personality" — consistent browsing speed, deterministic per account
+        self._speed = fp_rng.uniform(0.6, 1.6)
 
         co = (
             ChromiumOptions()
@@ -258,8 +259,83 @@ class LinuxDoBrowser:
         time.sleep(t)
         return t
 
+    @property
+    def _cookie_path(self):
+        """Path to cached cookie file for this account."""
+        safe_name = hashlib.md5(self.username.encode()).hexdigest()[:12]
+        cookie_dir = os.path.join(os.getcwd(), ".cookie_cache")
+        os.makedirs(cookie_dir, exist_ok=True)
+        return os.path.join(cookie_dir, f"{safe_name}.json")
+
+    def _save_cookies(self):
+        """Save browser cookies to disk for reuse in future runs."""
+        try:
+            cookies = self.page.cookies()
+            with open(self._cookie_path, "w", encoding="utf-8") as f:
+                json.dump(cookies, f, ensure_ascii=False)
+            self.log.info(f"Saved {len(cookies)} cookies to cache")
+        except Exception as e:
+            self.log.warning(f"Failed to save cookies: {e}")
+
+    def _try_cookie_login(self) -> bool:
+        """Try to restore session from cached cookies. Returns True if session is valid."""
+        cookie_path = self._cookie_path
+        if not os.path.exists(cookie_path):
+            return False
+
+        try:
+            with open(cookie_path, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+            if not cookies:
+                return False
+
+            self.log.info("Found cached cookies, attempting session restore...")
+
+            # Navigate to homepage first so we can set cookies on the right domain
+            self.page.get(HOME_URL)
+            time.sleep(random.uniform(1, 2))
+
+            # Inject cached cookies into the browser
+            for cookie in cookies:
+                try:
+                    self.page.set.cookies(cookie)
+                except Exception:
+                    pass
+
+            # Reload page with cookies
+            self.page.get(HOME_URL)
+            time.sleep(random.uniform(2, 4))
+
+            # Verify the session is still valid
+            user_ele = self.page.ele("@id=current-user", timeout=5)
+            if user_ele:
+                self.log.info("Cookie login successful — skipped form login")
+                return True
+
+            # Fallback: check for avatar
+            if "avatar" in (self.page.html or ""):
+                self.log.info("Cookie login successful (via avatar check)")
+                return True
+
+            self.log.info("Cached cookies expired, falling back to form login")
+            # Delete stale cookie file
+            try:
+                os.remove(cookie_path)
+            except Exception:
+                pass
+            return False
+        except Exception as e:
+            self.log.warning(f"Cookie restore failed: {e}")
+            return False
+
     def login(self):
         self.log.info("开始登录")
+
+        # Try cookie-based session restore first (avoids triggering login alerts)
+        if self._try_cookie_login():
+            # Still need CSRF token and cookie sync
+            self._post_login_setup()
+            return True
 
         # Step 1: Navigate to login page in browser (passes Cloudflare automatically)
         self.log.info("通过浏览器访问登录页面...")
@@ -353,7 +429,15 @@ class LinuxDoBrowser:
                 self.log.error("登录验证失败 (3次尝试后仍未找到 current-user)")
                 return False
 
-        # Step 5: Get CSRF token via browser JS (stays in browser context, no Cloudflare issue)
+        # Save cookies for future runs
+        self._save_cookies()
+
+        self._post_login_setup()
+        return True
+
+    def _post_login_setup(self):
+        """CSRF token fetch, cookie sync, connect info — shared by form login and cookie login."""
+        # Get CSRF token via browser JS (stays in browser context, no Cloudflare issue)
         self.log.info("通过浏览器获取 CSRF token...")
         try:
             csrf_token = self.page.run_js("""
@@ -388,8 +472,6 @@ class LinuxDoBrowser:
         # Navigate to homepage for browsing
         self.page.get(HOME_URL)
         self._wait(1, 3)
-
-        return True
 
     def browse_homepage(self):
         """Scroll the homepage a bit before clicking topics, like a real user."""
