@@ -78,7 +78,7 @@ def generate_semantic_reply(title: str) -> Optional[str]:
         )
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemma-3-27b-it",
             contents=prompt,
         )
         reply_text = response.text.strip().strip('"\'')
