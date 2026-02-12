@@ -195,6 +195,26 @@ class LinuxDoBrowser:
 
     def login(self):
         logger.info("开始登录")
+
+        # Step 0: Visit homepage in browser first to pass Cloudflare challenge
+        # This gets cf_clearance and other protection cookies that the API session needs
+        logger.info("通过浏览器访问首页获取 Cloudflare Cookie...")
+        try:
+            self.page.get(HOME_URL)
+            time.sleep(random.uniform(3, 6))
+
+            # Transfer browser cookies to the API session
+            browser_cookies = self.page.cookies()
+            for cookie in browser_cookies:
+                self.session.cookies.set(
+                    cookie.get("name", ""),
+                    cookie.get("value", ""),
+                    domain=cookie.get("domain", ".linux.do"),
+                )
+            logger.info(f"已从浏览器获取 {len(browser_cookies)} 个 Cookie")
+        except Exception as e:
+            logger.warning(f"浏览器预访问失败: {e}")
+
         # Step 1: Get CSRF Token
         logger.info("获取 CSRF token...")
         headers = {
@@ -429,6 +449,7 @@ class LinuxDoBrowser:
 
     def run(self):
         self.reply_result = None  # Track reply result (dict or None)
+        self.login_success = False  # Track whether login actually worked
         try:
             login_res = self.login()
             if login_res == "rate_limited":
@@ -436,6 +457,8 @@ class LinuxDoBrowser:
             if not login_res:
                 logger.warning("登录验证失败，跳过浏览")
                 return
+
+            self.login_success = True
 
             if BROWSE_ENABLED:
                 # Some users just login and leave (~15% chance)
@@ -748,10 +771,14 @@ if __name__ == "__main__":
             browser._used_topics = used_topics
             browser._used_phrases = used_phrases
             browser.run()
-            success_list.append(username)
-            if browser.reply_result:
-                replied_accounts.append(browser.reply_result)
-            logger.success(f"[{i}/{total}] Account {username} completed successfully")
+            if browser.login_success:
+                success_list.append(username)
+                if browser.reply_result:
+                    replied_accounts.append(browser.reply_result)
+                logger.success(f"[{i}/{total}] Account {username} completed successfully")
+            else:
+                fail_list.append(username)
+                logger.warning(f"[{i}/{total}] Account {username} login failed")
         except Exception as e:
             error_msg = str(e)
             if "RATE_LIMITED" in error_msg:
@@ -790,10 +817,14 @@ if __name__ == "__main__":
                 browser._used_topics = used_topics
                 browser._used_phrases = used_phrases
                 browser.run()
-                success_list.append(username)
-                if browser.reply_result:
-                    replied_accounts.append(browser.reply_result)
-                logger.success(f"[Retry {i}] Account {username} completed successfully")
+                if browser.login_success:
+                    success_list.append(username)
+                    if browser.reply_result:
+                        replied_accounts.append(browser.reply_result)
+                    logger.success(f"[Retry {i}] Account {username} completed successfully")
+                else:
+                    fail_list.append(username)
+                    logger.warning(f"[Retry {i}] Account {username} login failed")
             except Exception as e:
                 logger.error(f"[Retry {i}] Account {username} failed: {e}")
                 fail_list.append(username)
