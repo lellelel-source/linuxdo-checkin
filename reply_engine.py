@@ -66,9 +66,8 @@ def generate_semantic_reply(title: str) -> Optional[str]:
         return None
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        from google import genai
+        client = genai.Client(api_key=api_key)
 
         prompt = (
             f"你是一个热心的技术论坛用户。请根据帖子标题《{title}》，"
@@ -78,7 +77,10 @@ def generate_semantic_reply(title: str) -> Optional[str]:
             "只输出评论内容，不要有任何前缀或解释。"
         )
 
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
         reply_text = response.text.strip().strip('"\'')
 
         if not reply_text or len(reply_text) < 5:
