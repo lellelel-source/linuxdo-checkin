@@ -23,7 +23,7 @@ jobs:
         run: chrome --version
 
       - name: Set up Cloudflare WARP
-        uses: fscarmen/warp-on-actions@v1.3.0
+        uses: fscarmen/warp-on-actions@v1.3
         with:
           stack: ipv4
 
