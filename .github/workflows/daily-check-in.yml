@@ -30,10 +30,12 @@ jobs:
       - name: Restore cookie cache
         uses: actions/cache@v4
         with:
-          path: .cookie_cache
-          key: cookies-job-${{ matrix.job_index }}-${{ github.run_id }}
+          path: |
+            .cookie_cache
+            .daily_status
+          key: state-job-${{ matrix.job_index }}-${{ github.run_id }}
           restore-keys: |
-            cookies-job-${{ matrix.job_index }}-
+            state-job-${{ matrix.job_index }}-
 
       - name: Set up Python
         uses: actions/setup-python@v5

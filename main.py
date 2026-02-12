@@ -177,6 +177,43 @@ def _check_memory_and_cleanup():
         logger.info(f"Memory usage: {mem_pct:.1f}%")
 
 
+# --- Incremental run status tracking ---
+_DAILY_STATUS_DIR = os.path.join(os.getcwd(), ".daily_status")
+
+
+def _daily_status_path(job_index: int) -> str:
+    os.makedirs(_DAILY_STATUS_DIR, exist_ok=True)
+    return os.path.join(_DAILY_STATUS_DIR, f"job_{job_index}.json")
+
+
+def _load_daily_status(job_index: int) -> dict:
+    """Load today's completion status. Returns {date, done: [usernames]}."""
+    path = _daily_status_path(job_index)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("date") == today:
+                return data
+            # Stale (different day) — start fresh
+    except Exception:
+        pass
+    return {"date": today, "done": []}
+
+
+def _mark_done(job_index: int, username: str, status_cache: dict):
+    """Mark an account as completed today and persist immediately."""
+    if username not in status_cache["done"]:
+        status_cache["done"].append(username)
+    path = _daily_status_path(job_index)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(status_cache, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 class LinuxDoBrowser:
     def __init__(self, username: str, password: str) -> None:
         self.username = username
@@ -979,12 +1016,24 @@ if __name__ == "__main__":
     ACCOUNT_DELAY = int(os.environ.get("ACCOUNT_DELAY") or "60")  # seconds between accounts
     logger.info(f"Total accounts: {total} | Delay between accounts: {ACCOUNT_DELAY}s")
 
+    # Load incremental status — skip accounts already completed today
+    daily_status = _load_daily_status(JOB_INDEX)
+    already_done = set(daily_status.get("done", []))
+    if already_done:
+        logger.info(f"Incremental run: {len(already_done)} accounts already done today, will skip them")
+
     for i, account in enumerate(accounts, 1):
         username = account.get("username", "")
         password = account.get("password", "")
         if not username or not password:
             logger.warning(f"[{i}/{total}] Skipping account with missing username/password")
             fail_list.append(username or f"account_{i}")
+            continue
+
+        # Skip accounts already completed in a previous run today
+        if username in already_done:
+            logger.info(f"[{i}/{total}] Skipping {username} — already completed today")
+            success_list.append(username)
             continue
 
         logger.info(f"========== [{i}/{total}] Processing: {username} ==========")
@@ -997,6 +1046,7 @@ if __name__ == "__main__":
             browser.run()
             if browser.login_success:
                 success_list.append(username)
+                _mark_done(JOB_INDEX, username, daily_status)
                 if browser.reply_result:
                     replied_accounts.append(browser.reply_result)
                 logger.success(f"[{i}/{total}] Account {username} completed successfully")
@@ -1043,6 +1093,7 @@ if __name__ == "__main__":
                 browser.run()
                 if browser.login_success:
                     success_list.append(username)
+                    _mark_done(JOB_INDEX, username, daily_status)
                     if browser.reply_result:
                         replied_accounts.append(browser.reply_result)
                     logger.success(f"[Retry {i}] Account {username} completed successfully")

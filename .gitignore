@@ -1,3 +1,4 @@
 accounts.json
 .cookie_cache/
+.daily_status/
 __pycache__/
